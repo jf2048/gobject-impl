@@ -2,7 +2,7 @@ use heck::ToKebabCase;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use proc_macro_error::{abort_call_site, proc_macro_error};
-use quote::{quote, format_ident, ToTokens};
+use quote::{format_ident, quote, ToTokens};
 use std::collections::HashMap;
 use syn::{parse::Parse, Token};
 
@@ -68,7 +68,10 @@ impl Parse for Args {
             if lookahead.peek(keywords::impl_trait) {
                 let kw = input.parse::<keywords::impl_trait>()?;
                 if args.impl_trait.is_some() {
-                    return Err(syn::Error::new_spanned(kw, "Duplicate `impl_trait` attribute"));
+                    return Err(syn::Error::new_spanned(
+                        kw,
+                        "Duplicate `impl_trait` attribute",
+                    ));
                 }
                 if input.peek(Token![=]) {
                     input.parse::<Token![=]>()?;
@@ -99,7 +102,7 @@ impl Parse for Args {
 
 enum MethodName {
     Constructed,
-    Dispose
+    Dispose,
 }
 
 struct Method {
@@ -110,7 +113,11 @@ struct Method {
 
 impl Method {
     fn to_tokens(&self, name: &str) -> TokenStream2 {
-        let Self { attrs, inputs, block } = self;
+        let Self {
+            attrs,
+            inputs,
+            block,
+        } = self;
         let name = format_ident!("{}", name);
         let args = inputs.iter().skip(1);
         quote! {
@@ -164,12 +171,15 @@ impl CustomStruct {
         while content.peek(Token![#]) && content.peek2(Token![!]) {
             attrs.push({
                 let attr_content;
+                let bracket_token = syn::bracketed!(attr_content in content);
+                let path = attr_content.call(syn::Path::parse_mod_style)?;
+                let tokens = attr_content.parse()?;
                 syn::Attribute {
                     pound_token: content.parse()?,
                     style: syn::AttrStyle::Inner(content.parse()?),
-                    bracket_token: syn::bracketed!(attr_content in content),
-                    path: attr_content.call(syn::Path::parse_mod_style)?,
-                    tokens: attr_content.parse()?,
+                    bracket_token,
+                    path,
+                    tokens,
                 }
             });
         }
@@ -190,7 +200,10 @@ impl CustomStruct {
                 let mut signal_attrs = None;
                 for attr in attrs {
                     if signal_attrs.is_some() {
-                        return Err(syn::Error::new_spanned(attr, "Only one attribute allowed on signal"));
+                        return Err(syn::Error::new_spanned(
+                            attr,
+                            "Only one attribute allowed on signal",
+                        ));
                     }
                     signal_attrs = Some(syn::parse2::<SignalAttrs>(attr.tokens)?);
                 }
@@ -209,7 +222,10 @@ impl CustomStruct {
 
                 let signal = signals.entry(name.to_owned()).or_default();
                 if signal.inputs.is_some() {
-                    return Err(syn::Error::new_spanned(ident, format!("Duplicate definition for signal `{}`", name)));
+                    return Err(syn::Error::new_spanned(
+                        ident,
+                        format!("Duplicate definition for signal `{}`", name),
+                    ));
                 }
                 if let Some(attrs) = signal_attrs {
                     signal.flags = attrs.flags;
@@ -218,21 +234,34 @@ impl CustomStruct {
                 signal.public = match vis {
                     syn::Visibility::Inherited => false,
                     syn::Visibility::Public(_) => true,
-                    vis => return Err(syn::Error::new_spanned(vis, "Only `pub` or private is allowed for signal visibility")),
+                    vis => {
+                        return Err(syn::Error::new_spanned(
+                            vis,
+                            "Only `pub` or private is allowed for signal visibility",
+                        ))
+                    }
                 };
                 signal.inputs = Some(inputs);
                 signal.output = output;
                 signal.block = block;
-            } else if content.peek(signal::keywords::signal_accumulator) && content.peek2(syn::Ident) {
+            } else if content.peek(signal::keywords::signal_accumulator)
+                && content.peek2(syn::Ident)
+            {
                 let kw = content.parse::<signal::keywords::signal_accumulator>()?;
                 if !matches!(vis, syn::Visibility::Inherited) {
-                    return Err(syn::Error::new_spanned(vis, "signal_accumulator cannot have visibility"));
+                    return Err(syn::Error::new_spanned(
+                        vis,
+                        "signal_accumulator cannot have visibility",
+                    ));
                 }
                 let ident: syn::Ident = content.call(syn::ext::IdentExt::parse_any)?;
                 let mut acc_attrs = None;
                 for attr in attrs {
                     if acc_attrs.is_some() {
-                        return Err(syn::Error::new_spanned(attr, "Only one attribute allowed on signal_accumulator"));
+                        return Err(syn::Error::new_spanned(
+                            attr,
+                            "Only one attribute allowed on signal_accumulator",
+                        ));
                     }
                     acc_attrs = Some(syn::parse2::<SignalAccumulatorAttrs>(attr.tokens)?);
                 }
@@ -243,45 +272,65 @@ impl CustomStruct {
                 let inputs = parse_args(&content)?;
                 let output = content.parse::<syn::ReturnType>()?;
                 if matches!(output, syn::ReturnType::Default) {
-                    return Err(syn::Error::new_spanned(kw, "signal_accumulator must have return type"));
+                    return Err(syn::Error::new_spanned(
+                        kw,
+                        "signal_accumulator must have return type",
+                    ));
                 }
                 let block = Box::new(input.parse::<syn::Block>()?);
 
                 let signal = signals.entry(name.to_owned()).or_default();
                 if signal.accumulator.is_some() {
-                    return Err(syn::Error::new_spanned(ident, format!("Duplicate definition for signal_accumulator on signal `{}`", name)));
+                    return Err(syn::Error::new_spanned(
+                        ident,
+                        format!(
+                            "Duplicate definition for signal_accumulator on signal `{}`",
+                            name
+                        ),
+                    ));
                 }
                 signal.accumulator = Some((kw, inputs, block));
             } else if content.peek(Token![fn]) {
                 if !matches!(vis, syn::Visibility::Inherited) {
-                    return Err(syn::Error::new_spanned(vis, "function cannot have visibility"));
+                    return Err(syn::Error::new_spanned(
+                        vis,
+                        "function cannot have visibility",
+                    ));
                 }
                 content.parse::<Token![fn]>()?;
                 let (kw, method_name) = if content.peek(keywords::constructed) {
                     (
-                        content.parse::<keywords::constructed>()?.into_token_stream(),
-                        MethodName::Constructed
+                        content
+                            .parse::<keywords::constructed>()?
+                            .into_token_stream(),
+                        MethodName::Constructed,
                     )
                 } else if content.peek(keywords::dispose) {
                     (
                         content.parse::<keywords::dispose>()?.into_token_stream(),
-                        MethodName::Dispose
+                        MethodName::Dispose,
                     )
                 } else {
                     let ident: syn::Ident = content.call(syn::ext::IdentExt::parse_any)?;
-                    return Err(syn::Error::new_spanned(ident.clone(), format!("Unknown ObjectImpl function `{}`", ident)));
+                    return Err(syn::Error::new_spanned(
+                        ident.clone(),
+                        format!("Unknown ObjectImpl function `{}`", ident),
+                    ));
                 };
                 let inputs = parse_args(&content)?;
                 let recv = inputs.get(0).and_then(|a| match a {
                     syn::FnArg::Receiver(r) => Some(r),
-                    _ => None
+                    _ => None,
                 });
                 if recv.is_none() {
                     let span = inputs
                         .get(0)
                         .map(|t| t.to_token_stream())
                         .unwrap_or_else(|| kw);
-                    return Err(syn::Error::new_spanned(span, "First argument to function must be `&self`"));
+                    return Err(syn::Error::new_spanned(
+                        span,
+                        "First argument to function must be `&self`",
+                    ));
                 }
                 let block = Box::new(input.parse::<syn::Block>()?);
                 let storage = match method_name {
@@ -289,9 +338,16 @@ impl CustomStruct {
                     MethodName::Dispose => &mut dispose,
                 };
                 if storage.is_some() {
-                    return Err(syn::Error::new_spanned(kw.clone(), format!("Duplicate definition for `{}`", kw)));
+                    return Err(syn::Error::new_spanned(
+                        kw.clone(),
+                        format!("Duplicate definition for `{}`", kw),
+                    ));
                 }
-                storage.replace(Method { attrs, inputs, block });
+                storage.replace(Method {
+                    attrs,
+                    inputs,
+                    block,
+                });
             } else {
                 let ident = Some(if content.peek(Token![_]) {
                     content.call(syn::ext::IdentExt::parse_any)
@@ -333,7 +389,7 @@ impl CustomStruct {
 #[inline]
 fn constrain<F, T>(f: F) -> F
 where
-    F: for<'r> Fn(&'r syn::parse::ParseBuffer<'r>) -> syn::Result<T>
+    F: for<'r> Fn(&'r syn::parse::ParseBuffer<'r>) -> syn::Result<T>,
 {
     f
 }
@@ -363,14 +419,15 @@ pub fn object_impl(attr: TokenStream, item: TokenStream) -> proc_macro::TokenStr
         constructed,
         dispose,
     } = syn::parse::Parser::parse(constrain(|item| CustomStruct::parse(item, pod)), item)
-    .unwrap_or_else(|_| {
-        abort_call_site!("This macro should be used on the `struct` statement for an object impl")
-    });
+        .unwrap_or_else(|_| {
+            abort_call_site!(
+                "This macro should be used on the `struct` statement for an object impl"
+            )
+        });
     let go = go_crate_ident();
     let glib = quote! { #go::glib };
-    let impl_trait_name = impl_trait.map(|c| {
-        c.unwrap_or_else(|| format_ident!("{}CustomObjectImplExt", ident))
-    });
+    let impl_trait_name =
+        impl_trait.map(|c| c.unwrap_or_else(|| format_ident!("{}CustomObjectImplExt", ident)));
     let impl_trait = impl_trait_name.as_ref().map(|impl_trait_name| {
         quote! {
             trait #impl_trait_name {
@@ -405,7 +462,9 @@ pub fn object_impl(attr: TokenStream, item: TokenStream) -> proc_macro::TokenStr
     let signal_defs = if signals.is_empty() {
         quote! { &[] }
     } else {
-        let signals = signals.iter().map(|(name, signal)| signal.create(name, &glib));
+        let signals = signals
+            .iter()
+            .map(|(name, signal)| signal.create(name, &glib));
         quote! {
             static SIGNALS: #glib::once_cell::sync::Lazy<::std::vec::Vec<#glib::subclass::Signal>> = #glib::once_cell::sync::Lazy::new(|| {
                 vec![
@@ -443,15 +502,18 @@ pub fn object_impl(attr: TokenStream, item: TokenStream) -> proc_macro::TokenStr
     let mut props = vec![];
     let mut prop_set_impls = vec![];
     let mut prop_get_impls = vec![];
-    for prop in &properties {
-        if prop.skip {
-            continue;
-        }
+    for (index, prop) in properties.iter().filter(|p| !p.skip).enumerate() {
         props.push(prop.create(&go));
-        if let Some(set) = prop.set_impl() {
+        let index = index + 1;
+        let trait_name = if prop.public {
+            &public_trait
+        } else {
+            &private_trait
+        };
+        if let Some(set) = prop.set_impl(index, trait_name, &go) {
             prop_set_impls.push(set);
         }
-        if let Some(get) = prop.get_impl() {
+        if let Some(get) = prop.get_impl(index, trait_name, &glib) {
             prop_get_impls.push(get);
         }
     }
@@ -479,16 +541,16 @@ pub fn object_impl(attr: TokenStream, item: TokenStream) -> proc_macro::TokenStr
         prototypes.push(make_stmt(prop.pspec_prototype(&glib)));
         methods.push(prop.pspec_definition(index, &trait_name, &glib));
         prototypes.push(make_stmt(prop.notify_prototype()));
-        methods.push(prop.notify_definition(index, &trait_name));
+        methods.push(prop.notify_definition(index, &trait_name, &glib));
         prototypes.push(make_stmt(prop.connect_prototype(&glib)));
         methods.push(prop.connect_definition(&glib));
         if let Some(getter) = prop.getter_prototype() {
             prototypes.push(getter);
-            methods.push(prop.getter_definition().unwrap());
+            methods.push(prop.getter_definition(&go).unwrap());
         }
         if let Some(setter) = prop.setter_prototype() {
             prototypes.push(setter);
-            methods.push(prop.setter_definition().unwrap());
+            methods.push(prop.setter_definition(index, &trait_name, &go).unwrap());
         }
     }
 
@@ -510,25 +572,37 @@ pub fn object_impl(attr: TokenStream, item: TokenStream) -> proc_macro::TokenStr
             }
             fn set_property(
                 &self,
-                _obj: &<Self as #glib::subclass::types::ObjectSubclass>::Type,
-                _id: usize,
-                _value: &#glib::Value,
+                obj: &<Self as #glib::subclass::types::ObjectSubclass>::Type,
+                id: usize,
+                value: &#glib::Value,
                 pspec: &#glib::ParamSpec
             ) {
-                match pspec.name() {
+                match id {
                     #(#prop_set_impls)*
-                    _ => unimplemented!()
+                    _ => unimplemented!(
+                        "invalid property id {} for \"{}\" of type '{}' in '{}'",
+                        index,
+                        pspec.name(),
+                        pspec.type_().name(),
+                        obj.type_().name()
+                    )
                 }
             }
             fn property(
                 &self,
-                _obj: &<Self as #glib::subclass::types::ObjectSubclass>::Type,
+                obj: &<Self as #glib::subclass::types::ObjectSubclass>::Type,
                 id: usize,
-                _pspec: &#glib::ParamSpec
+                pspec: &#glib::ParamSpec
             ) -> #glib::Value {
-                match pspec.name() {
+                match id {
                     #(#prop_get_impls)*
-                    _ => unimplemented!()
+                    _ => unimplemented!(
+                        "invalid property id {} for \"{}\" of type '{}' in '{}'",
+                        index,
+                        pspec.name(),
+                        pspec.type_().name(),
+                        obj.type_().name()
+                    )
                 }
             }
             #constructed
@@ -549,5 +623,6 @@ pub fn object_impl(attr: TokenStream, item: TokenStream) -> proc_macro::TokenStr
         impl #impl_generics #public_trait for #ident #ty_generics #where_clause {
             #(#public_methods)*
         }
-    }.into()
+    }
+    .into()
 }

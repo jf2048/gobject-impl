@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 glib = "0.15"
-libc = "0.2"
+gobject-impl-macros = { path = "gobject-impl-macros" }
 
 [workspace]
 members = ["gobject-impl-macros"]
