@@ -1,0 +1,11 @@
+[package]
+name = "gobject-impl"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+glib = "0.15"
+libc = "0.2"
+
+[workspace]
+members = ["gobject-impl-macros"]

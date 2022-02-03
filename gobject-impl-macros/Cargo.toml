@@ -1,0 +1,17 @@
+[package]
+name = "gobject-impl-macros"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+bitflags = "1"
+heck = "0.4"
+proc-macro2 = "1"
+proc-macro-crate = "1"
+proc-macro-error = "1"
+quote = "1"
+syn = { version = "1", features = ["full"], default-features = false }
+
