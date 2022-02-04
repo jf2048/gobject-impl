@@ -42,14 +42,19 @@ impl SignalFlags {
         let count = Self::empty().bits().leading_zeros() - Self::all().bits().leading_zeros();
         let mut flags = vec![];
         for i in 0..count {
-            let flag = Self::from_bits(1 << i).unwrap();
-            if self.contains(flag) {
-                let flag = format!("{:?}", flag);
-                let flag = format_ident!("{}", flag);
-                flags.push(quote! { #glib::SignalFlags::#flag });
+            if let Some(flag) = Self::from_bits(1 << i) {
+                if self.contains(flag) {
+                    let flag = format!("{:?}", flag);
+                    let flag = format_ident!("{}", flag);
+                    flags.push(quote! { #glib::SignalFlags::#flag });
+                }
             }
         }
-        quote! { #(#flags)|* }
+        if flags.is_empty() {
+            quote! { #glib::SignalFlags::empty() }
+        } else {
+            quote! { #(#flags)|* }
+        }
     }
 }
 
@@ -190,7 +195,7 @@ impl Default for Signal {
 impl Signal {
     fn inputs(&self, name: &str) -> &Vec<syn::FnArg> {
         self.inputs.as_ref().unwrap_or_else(|| {
-            let (acc_kw, _, _) = self.accumulator.as_ref().unwrap();
+            let (acc_kw, _, _) = self.accumulator.as_ref().expect("no accumulator");
             abort!(acc_kw, format!("No definition for signal `{}`", name));
         })
     }
@@ -287,7 +292,7 @@ impl Signal {
     pub fn handler_definition(&self, name: &str) -> Option<TokenStream2> {
         if let Some(block) = &self.block {
             let Self { inputs, output, .. } = self;
-            let inputs = inputs.as_ref().unwrap();
+            let inputs = inputs.as_ref().expect("no inputs");
             let method_name = Self::handler_name(name);
             Some(quote! {
                 fn #method_name(#(#inputs),*) #output {

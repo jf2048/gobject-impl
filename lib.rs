@@ -2,6 +2,7 @@ use std::ops::DerefMut;
 
 use glib::{translate::*, value::ValueType, ParamFlags, ParamSpec, Value};
 
+pub use glib;
 pub use gobject_impl_macros::*;
 
 macro_rules! define_defaulted {
@@ -14,6 +15,9 @@ macro_rules! define_defaulted {
                 self.default = value;
                 self
             }
+            pub fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
+                <$name>::new(name, nick, blurb, self.default, flags)
+            }
         }
         impl HasParamSpec for $ty {
             type Builder = $builder_name;
@@ -21,11 +25,6 @@ macro_rules! define_defaulted {
                 $builder_name {
                     default: Default::default(),
                 }
-            }
-        }
-        impl ParamSpecBuilder for $builder_name {
-            fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
-                <$name>::new(name, nick, blurb, self.default, flags)
             }
         }
     };
@@ -51,19 +50,7 @@ macro_rules! define_numeric {
                 self.default = value;
                 self
             }
-        }
-        impl HasParamSpec for $ty {
-            type Builder = $builder_name;
-            fn builder() -> $builder_name {
-                $builder_name {
-                    minimum: <$ty>::MIN,
-                    maximum: <$ty>::MAX,
-                    default: Default::default(),
-                }
-            }
-        }
-        impl ParamSpecBuilder for $builder_name {
-            fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
+            pub fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
                 <$name>::new(
                     name,
                     nick,
@@ -75,16 +62,22 @@ macro_rules! define_numeric {
                 )
             }
         }
+        impl HasParamSpec for $ty {
+            type Builder = $builder_name;
+            fn builder() -> $builder_name {
+                $builder_name {
+                    minimum: <$ty>::MIN,
+                    maximum: <$ty>::MAX,
+                    default: Default::default(),
+                }
+            }
+        }
     };
 }
 
 pub trait HasParamSpec {
     type Builder;
     fn builder() -> <Self as HasParamSpec>::Builder;
-}
-
-pub trait ParamSpecBuilder {
-    fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec;
 }
 
 define_defaulted!(bool, glib::ParamSpecBoolean, ParamSpecBooleanBuilder);
@@ -106,16 +99,14 @@ impl ParamSpecStringBuilder {
         self.default = Some(value);
         self
     }
+    pub fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
+        glib::ParamSpecString::new(name, nick, blurb, self.default, flags)
+    }
 }
 impl HasParamSpec for String {
     type Builder = ParamSpecStringBuilder;
     fn builder() -> ParamSpecStringBuilder {
         ParamSpecStringBuilder { default: None }
-    }
-}
-impl ParamSpecBuilder for ParamSpecStringBuilder {
-    fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
-        glib::ParamSpecString::new(name, nick, blurb, self.default, flags)
     }
 }
 impl HasParamSpec for Option<String> {
@@ -133,17 +124,7 @@ impl ParamSpecParamBuilder {
         self.type_ = T::static_type();
         self
     }
-}
-impl HasParamSpec for ParamSpec {
-    type Builder = ParamSpecParamBuilder;
-    fn builder() -> ParamSpecParamBuilder {
-        ParamSpecParamBuilder {
-            type_: glib::Type::UNIT,
-        }
-    }
-}
-impl ParamSpecBuilder for ParamSpecParamBuilder {
-    fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
+    pub fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
         if self.type_ == glib::Type::UNIT {
             panic!(
                 "property `{}` must specify a type implementing glib::ParamSpecType",
@@ -151,6 +132,14 @@ impl ParamSpecBuilder for ParamSpecParamBuilder {
             );
         }
         glib::ParamSpecParam::new(name, nick, blurb, self.type_, flags)
+    }
+}
+impl HasParamSpec for ParamSpec {
+    type Builder = ParamSpecParamBuilder;
+    fn builder() -> ParamSpecParamBuilder {
+        ParamSpecParamBuilder {
+            type_: glib::Type::UNIT,
+        }
     }
 }
 impl HasParamSpec for Option<ParamSpec> {
@@ -161,6 +150,11 @@ impl HasParamSpec for Option<ParamSpec> {
 }
 
 pub struct ParamSpecPointerBuilder {}
+impl ParamSpecPointerBuilder {
+    pub fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
+        glib::ParamSpecPointer::new(name, nick, blurb, flags)
+    }
+}
 impl<T> HasParamSpec for *mut T {
     type Builder = ParamSpecPointerBuilder;
     fn builder() -> ParamSpecPointerBuilder {
@@ -173,11 +167,6 @@ impl<T> HasParamSpec for *const T {
         ParamSpecPointerBuilder {}
     }
 }
-impl ParamSpecBuilder for ParamSpecPointerBuilder {
-    fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
-        glib::ParamSpecPointer::new(name, nick, blurb, flags)
-    }
-}
 
 pub struct ParamSpecGTypeBuilder {
     type_: glib::Type,
@@ -187,6 +176,9 @@ impl ParamSpecGTypeBuilder {
         self.type_ = T::static_type();
         self
     }
+    pub fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
+        glib::ParamSpecGType::new(name, nick, blurb, self.type_, flags)
+    }
 }
 impl HasParamSpec for glib::Type {
     type Builder = ParamSpecGTypeBuilder;
@@ -194,11 +186,6 @@ impl HasParamSpec for glib::Type {
         ParamSpecGTypeBuilder {
             type_: glib::Type::UNIT,
         }
-    }
-}
-impl ParamSpecBuilder for ParamSpecGTypeBuilder {
-    fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
-        glib::ParamSpecGType::new(name, nick, blurb, self.type_, flags)
     }
 }
 
@@ -215,18 +202,7 @@ impl ParamSpecVariantBuilder {
         self.default = Some(value);
         self
     }
-}
-impl HasParamSpec for glib::Variant {
-    type Builder = ParamSpecVariantBuilder;
-    fn builder() -> ParamSpecVariantBuilder {
-        ParamSpecVariantBuilder {
-            type_: glib::VariantTy::ANY,
-            default: None,
-        }
-    }
-}
-impl ParamSpecBuilder for ParamSpecVariantBuilder {
-    fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
+    pub fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
         let mut error = std::ptr::null_mut();
         let default = self.default.map(|s| {
             let end = &s[s.len()..];
@@ -247,6 +223,15 @@ impl ParamSpecBuilder for ParamSpecVariantBuilder {
             }
         });
         glib::ParamSpecVariant::new(name, nick, blurb, self.type_, default.as_ref(), flags)
+    }
+}
+impl HasParamSpec for glib::Variant {
+    type Builder = ParamSpecVariantBuilder;
+    fn builder() -> ParamSpecVariantBuilder {
+        ParamSpecVariantBuilder {
+            type_: glib::VariantTy::ANY,
+            default: None,
+        }
     }
 }
 impl HasParamSpec for Option<glib::Variant> {
