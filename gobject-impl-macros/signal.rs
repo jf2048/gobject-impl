@@ -7,7 +7,7 @@ use syn::{parse::Parse, Token};
 pub mod keywords {
     // signal keywords
     syn::custom_keyword!(signal);
-    syn::custom_keyword!(signal_accumulator);
+    syn::custom_keyword!(accumulator);
 
     // signal attributes
     syn::custom_keyword!(name);
@@ -146,7 +146,7 @@ pub struct Signal {
     pub output: syn::ReturnType,
     pub block: Option<Box<syn::Block>>,
     pub accumulator: Option<(
-        keywords::signal_accumulator,
+        keywords::accumulator,
         Vec<syn::FnArg>,
         Box<syn::Block>,
     )>,
@@ -234,10 +234,10 @@ impl Signal {
         let accumulator = accumulator.as_ref().map(|(_, args, block)| {
             quote! {
                 let builder = builder.accumulator(|hint, acc, value| {
-                    fn accumulator(#(#args),*) -> bool {
+                    fn ____accumulator(#(#args),*) -> bool {
                         #block
                     }
-                    accumulator(hint, acc, value)
+                    ____accumulator(hint, acc, value)
                 });
             }
         });

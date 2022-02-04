@@ -357,14 +357,14 @@ impl ObjectDefinition {
                         ));
                     }
                 }
-            } else if content.peek(signal::keywords::signal_accumulator)
+            } else if content.peek(signal::keywords::accumulator)
                 && content.peek2(syn::Ident)
             {
-                let kw = content.parse::<signal::keywords::signal_accumulator>()?;
+                let kw = content.parse::<signal::keywords::accumulator>()?;
                 if !matches!(vis, syn::Visibility::Inherited) {
                     return Err(syn::Error::new_spanned(
                         vis,
-                        "signal_accumulator cannot have visibility",
+                        "accumulator cannot have visibility",
                     ));
                 }
                 let ident: syn::Ident = content.call(syn::ext::IdentExt::parse_any)?;
@@ -373,7 +373,7 @@ impl ObjectDefinition {
                 if matches!(output, syn::ReturnType::Default) {
                     return Err(syn::Error::new_spanned(
                         kw,
-                        "signal_accumulator must have return type",
+                        "accumulator must have return type",
                     ));
                 }
                 let block = Box::new(input.parse::<syn::Block>()?);
@@ -383,7 +383,7 @@ impl ObjectDefinition {
                     return Err(syn::Error::new_spanned(
                         &ident,
                         format!(
-                            "Duplicate definition for signal_accumulator on signal definition `{}`",
+                            "Duplicate definition for accumulator on signal definition `{}`",
                             ident
                         ),
                     ));
