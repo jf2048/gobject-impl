@@ -1,6 +1,6 @@
 use proc_macro2::TokenStream;
 use proc_macro_error::{abort, abort_call_site};
-use quote:: quote;
+use quote::quote;
 
 use super::util::*;
 
@@ -20,8 +20,11 @@ pub fn interface_impl(args: Args, item: proc_macro::TokenStream) -> TokenStream 
         abort_call_site!("must provide either a `type` attribute, or `public_trait` and `private_trait` attributes");
     }
 
-    let definition = syn::parse::Parser::parse(super::constrain(|item| ObjectDefinition::parse(item, pod, false)), item)
-        .unwrap_or_else(|e| abort!(e));
+    let definition = syn::parse::Parser::parse(
+        super::constrain(|item| ObjectDefinition::parse(item, pod, true)),
+        item,
+    )
+    .unwrap_or_else(|e| abort!(e));
     let header = definition.header_tokens();
 
     let ObjectDefinition {
@@ -68,12 +71,12 @@ pub fn interface_impl(args: Args, item: proc_macro::TokenStream) -> TokenStream 
         quote! { #glib::subclass::prelude::ObjectInterface }
     };
 
-    let method_type = type_
-        .map(OutputMethods::Type)
-        .unwrap_or_else(|| OutputMethods::Trait(
-                quote! { <#self_ty as #glib::subclass::prelude::ObjectInterface>::Type },
-                generics.clone()
-            ));
+    let method_type = type_.map(OutputMethods::Type).unwrap_or_else(|| {
+        OutputMethods::Trait(
+            quote! { <#self_ty as #glib::subclass::prelude::ObjectInterface>::Type },
+            generics.clone(),
+        )
+    });
 
     let Output {
         private_impl_methods,
@@ -88,7 +91,7 @@ pub fn interface_impl(args: Args, item: proc_macro::TokenStream) -> TokenStream 
         &trait_name,
         public_trait.as_ref(),
         private_trait.as_ref(),
-        &go
+        &go,
     );
 
     quote! {

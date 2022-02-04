@@ -12,8 +12,11 @@ pub fn object_impl(args: Args, item: proc_macro::TokenStream) -> TokenStream {
         pod,
     } = args;
 
-    let definition = syn::parse::Parser::parse(super::constrain(|item| ObjectDefinition::parse(item, pod, false)), item)
-        .unwrap_or_else(|e| proc_macro_error::abort!(e));
+    let definition = syn::parse::Parser::parse(
+        super::constrain(|item| ObjectDefinition::parse(item, pod, false)),
+        item,
+    )
+    .unwrap_or_else(|e| proc_macro_error::abort!(e));
     let header = definition.header_tokens();
 
     let ObjectDefinition {
@@ -60,13 +63,12 @@ pub fn object_impl(args: Args, item: proc_macro::TokenStream) -> TokenStream {
     let public_trait = public_trait.unwrap_or_else(|| format_ident!("{}ObjectExt", ident));
     let private_trait = private_trait.unwrap_or_else(|| format_ident!("{}ObjectImplExt", ident));
 
-
-    let method_type = type_
-        .map(OutputMethods::Type)
-        .unwrap_or_else(|| OutputMethods::Trait(
-                quote! { <#ident as #glib::subclass::types::ObjectSubclass>::Type },
-                generics.clone()
-            ));
+    let method_type = type_.map(OutputMethods::Type).unwrap_or_else(|| {
+        OutputMethods::Trait(
+            quote! { <#ident as #glib::subclass::types::ObjectSubclass>::Type },
+            generics.clone(),
+        )
+    });
 
     let Output {
         private_impl_methods,
@@ -82,7 +84,7 @@ pub fn object_impl(args: Args, item: proc_macro::TokenStream) -> TokenStream {
         &trait_name,
         Some(&public_trait),
         Some(&private_trait),
-        &go
+        &go,
     );
 
     let fields = properties.iter().filter_map(|p| p.field.as_ref());
@@ -145,4 +147,3 @@ pub fn object_impl(args: Args, item: proc_macro::TokenStream) -> TokenStream {
         #define_methods
     }
 }
-

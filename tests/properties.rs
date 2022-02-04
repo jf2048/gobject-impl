@@ -62,4 +62,3 @@ fn props() {
     assert_eq!(props.my_str(), "Updated");
     assert_eq!(props.property::<String>("my-str"), "Updated");
 }
-

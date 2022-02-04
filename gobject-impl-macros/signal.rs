@@ -184,27 +184,24 @@ impl Signal {
         &'a self,
         glib: &'a TokenStream2,
     ) -> impl Iterator<Item = TokenStream2> + 'a {
-        self.inputs()
-            .iter()
-            .enumerate()
-            .map(move |(index, input)| {
-                let ty = match input {
-                    syn::FnArg::Receiver(_) => quote! {
-                        <Self as #glib::subclass::types::ObjectSubclass>::Type
-                    },
-                    syn::FnArg::Typed(t) => {
-                        let ty = &t.ty;
-                        quote! { #ty }
-                    }
-                };
-                let arg_name = format_ident!("arg{}", index);
-                let err_msg = format!("Wrong type for argument {}: {{:?}}", index);
-                quote! {
-                    let #arg_name = args[#index].get::<#ty>().unwrap_or_else(|e| {
-                        panic!(#err_msg, e)
-                    });
+        self.inputs().iter().enumerate().map(move |(index, input)| {
+            let ty = match input {
+                syn::FnArg::Receiver(_) => quote! {
+                    <Self as #glib::subclass::types::ObjectSubclass>::Type
+                },
+                syn::FnArg::Typed(t) => {
+                    let ty = &t.ty;
+                    quote! { #ty }
                 }
-            })
+            };
+            let arg_name = format_ident!("arg{}", index);
+            let err_msg = format!("Wrong type for argument {}: {{:?}}", index);
+            quote! {
+                let #arg_name = args[#index].get::<#ty>().unwrap_or_else(|e| {
+                    panic!(#err_msg, e)
+                });
+            }
+        })
     }
     pub fn create(&self, glib: &TokenStream2) -> TokenStream2 {
         let Self {

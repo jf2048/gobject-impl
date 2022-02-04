@@ -12,7 +12,7 @@ pub fn go_crate_ident() -> syn::Ident {
 
     let crate_name = match proc_macro_crate::crate_name("gobject-impl") {
         Ok(FoundCrate::Name(name)) => name,
-        _ => "gobject-impl".to_owned(),
+        _ => "gobject_impl".to_owned(),
     };
 
     syn::Ident::new(&crate_name, proc_macro2::Span::call_site())
@@ -91,10 +91,7 @@ impl Parse for Args {
             if lookahead.peek(Token![type]) {
                 let kw = input.parse::<Token![type]>()?;
                 if args.type_.is_some() {
-                    return Err(syn::Error::new_spanned(
-                        kw,
-                        "Duplicate `type` attribute",
-                    ));
+                    return Err(syn::Error::new_spanned(kw, "Duplicate `type` attribute"));
                 }
                 input.parse::<Token![=]>()?;
                 args.type_.replace(input.parse()?);
@@ -131,10 +128,16 @@ impl Parse for Args {
         }
         if args.type_.is_some() {
             if let Some(public_trait) = &args.public_trait {
-                return Err(syn::Error::new_spanned(public_trait, "`public_trait` not allowed with `type`"));
+                return Err(syn::Error::new_spanned(
+                    public_trait,
+                    "`public_trait` not allowed with `type`",
+                ));
             }
             if let Some(private_trait) = &args.private_trait {
-                return Err(syn::Error::new_spanned(private_trait, "`private_trait` not allowed with `type`"));
+                return Err(syn::Error::new_spanned(
+                    private_trait,
+                    "`private_trait` not allowed with `type`",
+                ));
             }
         }
         Ok(args)
@@ -150,7 +153,7 @@ pub enum DefinitionType {
         unsafety: Option<Token![unsafe]>,
         trait_: Option<(Option<Token![!]>, syn::Path)>,
         self_ty: Box<syn::Type>,
-    }
+    },
 }
 
 pub struct ObjectDefinition {
@@ -181,11 +184,14 @@ fn parse_args(content: &syn::parse::ParseBuffer) -> syn::Result<Vec<syn::FnArg>>
 
 impl ObjectDefinition {
     pub fn header_tokens(&self) -> TokenStream {
-        let Self { attrs, vis, generics, .. } = &self;
+        let Self {
+            attrs,
+            vis,
+            generics,
+            ..
+        } = &self;
         match &self.definition {
-            DefinitionType::Object {
-                ident,
-            } => quote! {
+            DefinitionType::Object { ident } => quote! {
                 #(#attrs)*
                 #vis struct #ident #generics
             },
@@ -249,12 +255,15 @@ impl ObjectDefinition {
 
             generics.where_clause = input.parse()?;
 
-            (DefinitionType::Interface {
-                defaultness,
-                unsafety,
-                trait_,
-                self_ty,
-            }, generics)
+            (
+                DefinitionType::Interface {
+                    defaultness,
+                    unsafety,
+                    trait_,
+                    self_ty,
+                },
+                generics,
+            )
         } else {
             input.parse::<Token![struct]>()?;
             let ident = input.parse::<syn::Ident>()?;
@@ -408,13 +417,13 @@ impl ObjectDefinition {
                     colon_token: Some(content.parse()?),
                     ty: content.parse()?,
                 };
-                let prop = Property::parse(field, pod)?;
+                let prop = Property::parse(field, pod, iface)?;
                 let name = prop.name();
                 if properties.contains_key(&name) {
-                        return Err(syn::Error::new_spanned(
-                            &ident,
-                            format!("Duplicate definition for property `{}`", name),
-                        ));
+                    return Err(syn::Error::new_spanned(
+                        &ident,
+                        format!("Duplicate definition for property `{}`", name),
+                    ));
                 }
                 properties.insert(name, prop);
                 if content.is_empty() {
@@ -443,7 +452,7 @@ impl ObjectDefinition {
 
 pub enum OutputMethods {
     Type(syn::Type),
-    Trait(TokenStream, syn::Generics)
+    Trait(TokenStream, syn::Generics),
 }
 
 pub struct Output {
@@ -457,8 +466,8 @@ pub struct Output {
 
 impl Output {
     pub fn new(
-        signals: &Vec<Signal>,
-        properties: &Vec<Property>,
+        signals: &[Signal],
+        properties: &[Property],
         method_type: OutputMethods,
         trait_name: &TokenStream,
         public_trait: Option<&syn::Ident>,
@@ -476,9 +485,7 @@ impl Output {
         let signal_defs = if signals.is_empty() {
             quote! { &[] }
         } else {
-            let signals = signals
-                .iter()
-                .map(|signal| signal.create(&glib));
+            let signals = signals.iter().map(|signal| signal.create(&glib));
             quote! {
                 static SIGNALS: #glib::once_cell::sync::Lazy<::std::vec::Vec<#glib::subclass::Signal>> = #glib::once_cell::sync::Lazy::new(|| {
                     vec![
@@ -496,7 +503,7 @@ impl Output {
                 (&mut private_prototypes, &mut private_methods)
             };
             prototypes.push(make_stmt(signal.emit_prototype(&glib)));
-            methods.push(signal.emit_definition(index, &trait_name, &glib));
+            methods.push(signal.emit_definition(index, trait_name, &glib));
 
             let (prototypes, methods) = if signal.public {
                 (&mut public_prototypes, &mut public_methods)
@@ -504,9 +511,9 @@ impl Output {
                 (&mut private_prototypes, &mut private_methods)
             };
             prototypes.push(make_stmt(signal.signal_prototype(&glib)));
-            methods.push(signal.signal_definition(index, &trait_name, &glib));
+            methods.push(signal.signal_definition(index, trait_name, &glib));
             prototypes.push(make_stmt(signal.connect_prototype(&glib)));
-            methods.push(signal.connect_definition(index, &trait_name, &glib));
+            methods.push(signal.connect_definition(index, trait_name, &glib));
 
             if let Some(method) = signal.handler_definition() {
                 private_impl_methods.push(method);
@@ -517,16 +524,16 @@ impl Output {
         let mut prop_set_impls = vec![];
         let mut prop_get_impls = vec![];
         for (index, prop) in properties.iter().filter(|p| !p.skip).enumerate() {
-            props.push(prop.create(&go));
+            props.push(prop.create(go));
             let index = index + 1;
-            let trait_name =  if matches!(method_type, OutputMethods::Type(_)) {
+            let trait_name = if matches!(method_type, OutputMethods::Type(_)) {
                 None
             } else if prop.public {
                 public_trait
             } else {
                 private_trait
             };
-            if let Some(set) = prop.set_impl(index, trait_name, &go) {
+            if let Some(set) = prop.set_impl(index, trait_name, go) {
                 prop_set_impls.push(set);
             }
             if let Some(get) = prop.get_impl(index, trait_name, &glib) {
@@ -556,7 +563,7 @@ impl Output {
                     (&mut private_prototypes, &mut private_methods)
                 };
                 prototypes.push(make_stmt(prop.notify_prototype()));
-                methods.push(prop.notify_definition(index, &trait_name, &glib));
+                methods.push(prop.notify_definition(index, trait_name, &glib));
             }
             let (prototypes, methods) = if prop.public {
                 (&mut public_prototypes, &mut public_methods)
@@ -564,17 +571,17 @@ impl Output {
                 (&mut private_prototypes, &mut private_methods)
             };
             prototypes.push(make_stmt(prop.pspec_prototype(&glib)));
-            methods.push(prop.pspec_definition(index, &trait_name, &glib));
+            methods.push(prop.pspec_definition(index, trait_name, &glib));
             prototypes.push(make_stmt(prop.connect_prototype(&glib)));
             methods.push(prop.connect_definition(&glib));
-            if let Some(getter) = prop.getter_prototype(&go) {
+            if let Some(getter) = prop.getter_prototype(go) {
                 prototypes.push(make_stmt(getter));
-                methods.push(prop.getter_definition(&go).expect("no getter definition"));
+                methods.push(prop.getter_definition(go).expect("no getter definition"));
             }
-            if let Some(setter) = prop.setter_prototype(&go) {
+            if let Some(setter) = prop.setter_prototype(go) {
                 prototypes.push(make_stmt(setter));
                 methods.push(
-                    prop.setter_definition(index, &trait_name, &go)
+                    prop.setter_definition(index, trait_name, go)
                         .expect("no setter definition"),
                 );
             }
@@ -616,4 +623,3 @@ impl Output {
         }
     }
 }
-

@@ -15,7 +15,13 @@ macro_rules! define_defaulted {
                 self.default = value;
                 self
             }
-            pub fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
+            pub fn build(
+                self,
+                name: &str,
+                nick: &str,
+                blurb: &str,
+                flags: ParamFlags,
+            ) -> ParamSpec {
                 <$name>::new(name, nick, blurb, self.default, flags)
             }
         }
@@ -50,7 +56,13 @@ macro_rules! define_numeric {
                 self.default = value;
                 self
             }
-            pub fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
+            pub fn build(
+                self,
+                name: &str,
+                nick: &str,
+                blurb: &str,
+                flags: ParamFlags,
+            ) -> ParamSpec {
                 <$name>::new(
                     name,
                     nick,
