@@ -1,6 +1,6 @@
 use heck::{ToKebabCase, ToSnakeCase};
 use proc_macro2::{Span, TokenStream};
-use quote::{format_ident, quote, ToTokens};
+use quote::{format_ident, quote};
 use syn::Token;
 
 mod keywords {
@@ -16,6 +16,7 @@ mod keywords {
     syn::custom_keyword!(minimum);
     syn::custom_keyword!(maximum);
     syn::custom_keyword!(default);
+    syn::custom_keyword!(custom);
     syn::custom_keyword!(flags);
 
     syn::custom_keyword!(boxed);
@@ -76,7 +77,7 @@ pub enum PropertyType {
     Flags(keywords::flags),
     Boxed(keywords::boxed),
     Object(keywords::object),
-    Variant(keywords::variant, Option<syn::LitStr>),
+    Variant(keywords::variant, syn::LitStr),
 }
 
 impl Default for PropertyType {
@@ -124,9 +125,7 @@ pub struct Property {
     pub name: PropertyName,
     pub nick: Option<syn::LitStr>,
     pub blurb: Option<syn::LitStr>,
-    pub minimum: Option<syn::Lit>,
-    pub maximum: Option<syn::Lit>,
-    pub default: Option<syn::Lit>,
+    pub buildable_props: Vec<(syn::Ident, syn::Lit)>,
     pub flags: PropertyFlags,
     pub flag_spans: Vec<Span>,
 }
@@ -157,73 +156,24 @@ impl Property {
         let static_type = quote! {
             <<<#ty as #go::ParamStore>::Type as #glib::value::ValueType>::Type as #glib::StaticType>::static_type(),
         };
-        match &self.special_type {
-            PropertyType::Unspecified => {
-                let minimum = self.minimum.as_ref().map(|d| quote! { .minimum(#d) });
-                let maximum = self.maximum.as_ref().map(|d| quote! { .maximum(#d) });
-                let default = self.default.as_ref().map(|d| quote! { .default(#d) });
-                quote! {
-                    <#ty as #go::HasParamSpec>::builder()
-                    #minimum
-                    #maximum
-                    #default
-                    .build(#name, #nick, #blurb, #flags)
-                }
-            }
-            PropertyType::Enum(_) => {
-                let default = self
-                    .default
-                    .as_ref()
-                    .map(|p| p.to_token_stream())
-                    .unwrap_or_else(|| quote! { 0 });
-                quote! {
-                    #glib::ParamSpecEnum::new(
-                        #name, #nick, #blurb,
-                        #static_type,
-                        #default,
-                        #flags
-                    )
-                }
-            }
-            PropertyType::Flags(_) => {
-                let default = self
-                    .default
-                    .as_ref()
-                    .map(|p| p.to_token_stream())
-                    .unwrap_or_else(|| quote! { 0 });
-                quote! {
-                    #glib::ParamSpecFlags::new(
-                        #name, #nick, #blurb,
-                        #static_type,
-                        #default,
-                        #flags
-                    )
-                }
-            }
-            PropertyType::Boxed(_) => quote! {
-                #glib::ParamSpecBoxed::new(
-                    #name, #nick, #blurb,
-                    #static_type,
-                    #flags
-                )
-            },
-            PropertyType::Object(_) => quote! {
-                #glib::ParamSpecObject::new(
-                    #name, #nick, #blurb,
-                    #static_type,
-                    #flags
-                )
-            },
-            PropertyType::Variant(_, element) => {
-                let element = element.as_ref().map(|e| quote! { .type_(#e) });
-                let default = self.default.as_ref().map(|d| quote! { .default(#d) });
-                quote! {
-                    <#glib::Variant as #go::HasParamSpec>::builder()
-                    #element
-                    #default
-                    .build(#name, #nick, #blurb, #flags)
-                }
-            }
+        let props = self.buildable_props.iter().map(|(ident, value)| quote! { .#ident(#value) });
+        let builder = match &self.special_type {
+            PropertyType::Enum(_) => quote! { #go::ParamSpecEnumBuilder::new() },
+            PropertyType::Flags(_) => quote! { #go::ParamSpecFlagsBuilder::new() },
+            PropertyType::Boxed(_) => quote! { #go::ParamSpecBoxedBuilder::new() },
+            PropertyType::Object(_) => quote! { #go::ParamSpecObjectBuilder::new() },
+            _ => quote! { <#ty as #go::ParamSpecBuildable>::builder() },
+        };
+        let type_prop = match &self.special_type {
+            PropertyType::Unspecified => None,
+            PropertyType::Variant(_, element) => Some(quote! { .type_(#element) }),
+            _ => Some(quote! { .type_(#static_type) }),
+        };
+        quote! {
+            #builder
+            #type_prop
+            #(#props)*
+            .build(#name, #nick, #blurb, #flags)
         }
     }
     pub fn name(&self) -> String {
@@ -453,9 +403,7 @@ impl Property {
             name: PropertyName::Field(field.ident.clone().expect("no field ident")),
             nick: None,
             blurb: None,
-            minimum: None,
-            maximum: None,
-            default: None,
+            buildable_props: vec![],
             flags: PropertyFlags::empty(),
             flag_spans: vec![],
         }
@@ -577,25 +525,44 @@ impl Property {
                 prop.blurb.replace(input.parse::<syn::LitStr>()?);
             } else if lookahead.peek(keywords::minimum) {
                 let kw = input.parse::<keywords::minimum>()?;
-                if prop.minimum.is_some() {
+                let ident = format_ident!("minimum");
+                if prop.buildable_props.iter().find(|(n, _)| *n == ident).is_some() {
                     return Err(syn::Error::new_spanned(kw, "Duplicate `minimum` attribute"));
                 }
                 input.parse::<Token![=]>()?;
-                prop.minimum.replace(input.parse::<syn::Lit>()?);
+                prop.buildable_props.push((ident, input.parse::<syn::Lit>()?));
             } else if lookahead.peek(keywords::maximum) {
                 let kw = input.parse::<keywords::maximum>()?;
-                if prop.maximum.is_some() {
+                let ident = format_ident!("maximum");
+                if prop.buildable_props.iter().find(|(n, _)| *n == ident).is_some() {
                     return Err(syn::Error::new_spanned(kw, "Duplicate `maximum` attribute"));
                 }
                 input.parse::<Token![=]>()?;
-                prop.maximum.replace(input.parse::<syn::Lit>()?);
+                prop.buildable_props.push((ident, input.parse::<syn::Lit>()?));
             } else if lookahead.peek(keywords::default) {
                 let kw = input.parse::<keywords::default>()?;
-                if prop.default.is_some() {
+                let ident = format_ident!("default");
+                if prop.buildable_props.iter().find(|(n, _)| *n == ident).is_some() {
                     return Err(syn::Error::new_spanned(kw, "Duplicate `default` attribute"));
                 }
                 input.parse::<Token![=]>()?;
-                prop.default.replace(input.parse::<syn::Lit>()?);
+                prop.buildable_props.push((ident, input.parse::<syn::Lit>()?));
+            } else if lookahead.peek(keywords::custom) {
+                input.parse::<keywords::custom>()?;
+                let custom;
+                syn::parenthesized!(custom in input);
+                while custom.is_empty() {
+                    let ident = custom.parse()?;
+                    if prop.buildable_props.iter().find(|(n, _)| *n == ident).is_some() {
+                        return Err(syn::Error::new_spanned(&ident, format!("Duplicate `{}` attribute", ident)));
+                    }
+                    custom.parse::<Token![=]>()?;
+                    let value = custom.parse()?;
+                    if !custom.is_empty() {
+                        custom.parse::<Token![,]>()?;
+                    }
+                    prop.buildable_props.push((ident, value));
+                }
             } else if lookahead.peek(Token![enum]) {
                 let kw = input.parse::<Token![enum]>()?;
                 if matches!(prop.special_type, PropertyType::Unspecified) {
@@ -639,13 +606,9 @@ impl Property {
             } else if lookahead.peek(keywords::variant) {
                 let kw = input.parse::<keywords::variant>()?;
                 if matches!(prop.special_type, PropertyType::Unspecified) {
-                    if input.peek(Token![=]) {
-                        input.parse::<Token![=]>()?;
-                        let element = input.parse::<syn::LitStr>()?;
-                        prop.special_type = PropertyType::Variant(kw, Some(element));
-                    } else {
-                        prop.special_type = PropertyType::Variant(kw, None);
-                    }
+                    input.parse::<Token![=]>()?;
+                    let element = input.parse::<syn::LitStr>()?;
+                    prop.special_type = PropertyType::Variant(kw, element);
                 } else {
                     return Err(syn::Error::new_spanned(
                         kw,
@@ -762,22 +725,10 @@ impl Property {
                     "`blurb` not allowed on override property",
                 ));
             }
-            if let Some(minimum) = &prop.minimum {
+            if let Some((ident, _)) = prop.buildable_props.first() {
                 return Err(syn::Error::new_spanned(
-                    minimum,
-                    "`minimum` not allowed on override property",
-                ));
-            }
-            if let Some(maximum) = &prop.maximum {
-                return Err(syn::Error::new_spanned(
-                    maximum,
-                    "`maximum` not allowed on override property",
-                ));
-            }
-            if let Some(default) = &prop.default {
-                return Err(syn::Error::new_spanned(
-                    default,
-                    "`default` not allowed on override property",
+                    ident,
+                    format!("`{}` not allowed on override property", ident),
                 ));
             }
             if let Some(flag) = prop.flag_spans.first() {

@@ -25,7 +25,7 @@ macro_rules! define_defaulted {
                 <$name>::new(name, nick, blurb, self.default, flags)
             }
         }
-        impl HasParamSpec for $ty {
+        impl ParamSpecBuildable for $ty {
             type Builder = $builder_name;
             fn builder() -> $builder_name {
                 $builder_name {
@@ -74,7 +74,7 @@ macro_rules! define_numeric {
                 )
             }
         }
-        impl HasParamSpec for $ty {
+        impl ParamSpecBuildable for $ty {
             type Builder = $builder_name;
             fn builder() -> $builder_name {
                 $builder_name {
@@ -87,9 +87,9 @@ macro_rules! define_numeric {
     };
 }
 
-pub trait HasParamSpec {
+pub trait ParamSpecBuildable {
     type Builder;
-    fn builder() -> <Self as HasParamSpec>::Builder;
+    fn builder() -> <Self as ParamSpecBuildable>::Builder;
 }
 
 define_defaulted!(bool, glib::ParamSpecBoolean, ParamSpecBooleanBuilder);
@@ -115,16 +115,16 @@ impl ParamSpecStringBuilder {
         glib::ParamSpecString::new(name, nick, blurb, self.default, flags)
     }
 }
-impl HasParamSpec for String {
+impl ParamSpecBuildable for String {
     type Builder = ParamSpecStringBuilder;
     fn builder() -> ParamSpecStringBuilder {
         ParamSpecStringBuilder { default: None }
     }
 }
-impl HasParamSpec for Option<String> {
+impl ParamSpecBuildable for Option<String> {
     type Builder = ParamSpecStringBuilder;
     fn builder() -> ParamSpecStringBuilder {
-        <String as HasParamSpec>::builder()
+        <String as ParamSpecBuildable>::builder()
     }
 }
 
@@ -146,7 +146,7 @@ impl ParamSpecParamBuilder {
         glib::ParamSpecParam::new(name, nick, blurb, self.type_, flags)
     }
 }
-impl HasParamSpec for ParamSpec {
+impl ParamSpecBuildable for ParamSpec {
     type Builder = ParamSpecParamBuilder;
     fn builder() -> ParamSpecParamBuilder {
         ParamSpecParamBuilder {
@@ -154,10 +154,10 @@ impl HasParamSpec for ParamSpec {
         }
     }
 }
-impl HasParamSpec for Option<ParamSpec> {
+impl ParamSpecBuildable for Option<ParamSpec> {
     type Builder = ParamSpecParamBuilder;
     fn builder() -> ParamSpecParamBuilder {
-        <ParamSpec as HasParamSpec>::builder()
+        <ParamSpec as ParamSpecBuildable>::builder()
     }
 }
 
@@ -167,13 +167,13 @@ impl ParamSpecPointerBuilder {
         glib::ParamSpecPointer::new(name, nick, blurb, flags)
     }
 }
-impl<T> HasParamSpec for *mut T {
+impl<T> ParamSpecBuildable for *mut T {
     type Builder = ParamSpecPointerBuilder;
     fn builder() -> ParamSpecPointerBuilder {
         ParamSpecPointerBuilder {}
     }
 }
-impl<T> HasParamSpec for *const T {
+impl<T> ParamSpecBuildable for *const T {
     type Builder = ParamSpecPointerBuilder;
     fn builder() -> ParamSpecPointerBuilder {
         ParamSpecPointerBuilder {}
@@ -192,12 +192,96 @@ impl ParamSpecGTypeBuilder {
         glib::ParamSpecGType::new(name, nick, blurb, self.type_, flags)
     }
 }
-impl HasParamSpec for glib::Type {
+impl ParamSpecBuildable for glib::Type {
     type Builder = ParamSpecGTypeBuilder;
     fn builder() -> ParamSpecGTypeBuilder {
         ParamSpecGTypeBuilder {
             type_: glib::Type::UNIT,
         }
+    }
+}
+
+pub struct ParamSpecEnumBuilder {
+    type_: glib::Type,
+    default: i32,
+}
+impl ParamSpecEnumBuilder {
+    pub fn new() -> Self {
+        Self {
+            type_: glib::Type::UNIT,
+            default: 0,
+        }
+    }
+    pub fn type_<T: glib::StaticType>(mut self) -> Self {
+        self.type_ = T::static_type();
+        self
+    }
+    pub fn default(mut self, value: i32) -> Self {
+        self.default = value;
+        self
+    }
+    pub fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
+        glib::ParamSpecEnum::new(name, nick, blurb, self.type_, self.default, flags)
+    }
+}
+
+pub struct ParamSpecFlagsBuilder {
+    type_: glib::Type,
+    default: u32,
+}
+impl ParamSpecFlagsBuilder {
+    pub fn new() -> Self {
+        Self {
+            type_: glib::Type::UNIT,
+            default: 0,
+        }
+    }
+    pub fn type_<T: glib::StaticType>(mut self) -> Self {
+        self.type_ = T::static_type();
+        self
+    }
+    pub fn default(mut self, value: u32) -> Self {
+        self.default = value;
+        self
+    }
+    pub fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
+        glib::ParamSpecFlags::new(name, nick, blurb, self.type_, self.default, flags)
+    }
+}
+
+pub struct ParamSpecBoxedBuilder {
+    type_: glib::Type,
+}
+impl ParamSpecBoxedBuilder {
+    pub fn new() -> Self {
+        Self {
+            type_: glib::Type::UNIT,
+        }
+    }
+    pub fn type_<T: glib::StaticType>(mut self) -> Self {
+        self.type_ = T::static_type();
+        self
+    }
+    pub fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
+        glib::ParamSpecBoxed::new(name, nick, blurb, self.type_, flags)
+    }
+}
+
+pub struct ParamSpecObjectBuilder {
+    type_: glib::Type,
+}
+impl ParamSpecObjectBuilder {
+    pub fn new() -> Self {
+        Self {
+            type_: glib::Type::UNIT,
+        }
+    }
+    pub fn type_<T: glib::StaticType>(mut self) -> Self {
+        self.type_ = T::static_type();
+        self
+    }
+    pub fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
+        glib::ParamSpecObject::new(name, nick, blurb, self.type_, flags)
     }
 }
 
@@ -237,7 +321,7 @@ impl ParamSpecVariantBuilder {
         glib::ParamSpecVariant::new(name, nick, blurb, self.type_, default.as_ref(), flags)
     }
 }
-impl HasParamSpec for glib::Variant {
+impl ParamSpecBuildable for glib::Variant {
     type Builder = ParamSpecVariantBuilder;
     fn builder() -> ParamSpecVariantBuilder {
         ParamSpecVariantBuilder {
@@ -246,10 +330,10 @@ impl HasParamSpec for glib::Variant {
         }
     }
 }
-impl HasParamSpec for Option<glib::Variant> {
+impl ParamSpecBuildable for Option<glib::Variant> {
     type Builder = ParamSpecVariantBuilder;
     fn builder() -> ParamSpecVariantBuilder {
-        <glib::Variant as HasParamSpec>::builder()
+        <glib::Variant as ParamSpecBuildable>::builder()
     }
 }
 
@@ -267,63 +351,63 @@ pub trait ParamStoreWrite: ParamStore {
     }
 }
 
-impl<T: HasParamSpec> HasParamSpec for std::cell::Cell<T> {
+impl<T: ParamSpecBuildable> ParamSpecBuildable for std::cell::Cell<T> {
     type Builder = T::Builder;
-    fn builder() -> <Self as HasParamSpec>::Builder {
+    fn builder() -> <Self as ParamSpecBuildable>::Builder {
         T::builder()
     }
 }
 impl<T: ValueType> ParamStore for std::cell::Cell<T> {
     type Type = T;
 }
-impl<T: ValueType + Copy + HasParamSpec> ParamStoreRead for std::cell::Cell<T> {
+impl<T: ValueType + Copy + ParamSpecBuildable> ParamStoreRead for std::cell::Cell<T> {
     fn get_value(&self) -> glib::Value {
         std::cell::Cell::get(self).to_value()
     }
 }
-impl<T: ValueType + HasParamSpec + PartialEq + Copy> ParamStoreWrite for std::cell::Cell<T> {
+impl<T: ValueType + ParamSpecBuildable + PartialEq + Copy> ParamStoreWrite for std::cell::Cell<T> {
     fn set(&self, value: T) -> bool {
         let old = self.replace(value);
         old != self.get()
     }
 }
 
-impl<T: HasParamSpec> HasParamSpec for std::cell::RefCell<T> {
+impl<T: ParamSpecBuildable> ParamSpecBuildable for std::cell::RefCell<T> {
     type Builder = T::Builder;
-    fn builder() -> <Self as HasParamSpec>::Builder {
+    fn builder() -> <Self as ParamSpecBuildable>::Builder {
         T::builder()
     }
 }
 impl<T: ValueType> ParamStore for std::cell::RefCell<T> {
     type Type = T;
 }
-impl<T: ValueType + HasParamSpec> ParamStoreRead for std::cell::RefCell<T> {
+impl<T: ValueType + ParamSpecBuildable> ParamStoreRead for std::cell::RefCell<T> {
     fn get_value(&self) -> glib::Value {
         self.borrow().to_value()
     }
 }
-impl<T: ValueType + HasParamSpec + PartialEq> ParamStoreWrite for std::cell::RefCell<T> {
+impl<T: ValueType + ParamSpecBuildable + PartialEq> ParamStoreWrite for std::cell::RefCell<T> {
     fn set(&self, value: T) -> bool {
         let old = self.replace(value);
         old != *self.borrow()
     }
 }
 
-impl<T: HasParamSpec> HasParamSpec for std::sync::Mutex<T> {
+impl<T: ParamSpecBuildable> ParamSpecBuildable for std::sync::Mutex<T> {
     type Builder = T::Builder;
-    fn builder() -> <Self as HasParamSpec>::Builder {
+    fn builder() -> <Self as ParamSpecBuildable>::Builder {
         T::builder()
     }
 }
 impl<T: ValueType> ParamStore for std::sync::Mutex<T> {
     type Type = T;
 }
-impl<T: ValueType + HasParamSpec> ParamStoreRead for std::sync::Mutex<T> {
+impl<T: ValueType + ParamSpecBuildable> ParamStoreRead for std::sync::Mutex<T> {
     fn get_value(&self) -> glib::Value {
         self.lock().unwrap().to_value()
     }
 }
-impl<T: ValueType + HasParamSpec + PartialEq> ParamStoreWrite for std::sync::Mutex<T> {
+impl<T: ValueType + ParamSpecBuildable + PartialEq> ParamStoreWrite for std::sync::Mutex<T> {
     fn set(&self, value: T) -> bool {
         let mut storage = self.lock().unwrap();
         let old = std::mem::replace(storage.deref_mut(), value);
@@ -331,21 +415,21 @@ impl<T: ValueType + HasParamSpec + PartialEq> ParamStoreWrite for std::sync::Mut
     }
 }
 
-impl<T: HasParamSpec> HasParamSpec for std::sync::RwLock<T> {
+impl<T: ParamSpecBuildable> ParamSpecBuildable for std::sync::RwLock<T> {
     type Builder = T::Builder;
-    fn builder() -> <Self as HasParamSpec>::Builder {
+    fn builder() -> <Self as ParamSpecBuildable>::Builder {
         T::builder()
     }
 }
 impl<T: ValueType> ParamStore for std::sync::RwLock<T> {
     type Type = T;
 }
-impl<T: ValueType + HasParamSpec> ParamStoreRead for std::sync::RwLock<T> {
+impl<T: ValueType + ParamSpecBuildable> ParamStoreRead for std::sync::RwLock<T> {
     fn get_value(&self) -> glib::Value {
         self.read().unwrap().to_value()
     }
 }
-impl<T: ValueType + HasParamSpec + PartialEq> ParamStoreWrite for std::sync::RwLock<T> {
+impl<T: ValueType + ParamSpecBuildable + PartialEq> ParamStoreWrite for std::sync::RwLock<T> {
     fn set(&self, value: T) -> bool {
         let mut storage = self.write().unwrap();
         let old = std::mem::replace(storage.deref_mut(), value);
