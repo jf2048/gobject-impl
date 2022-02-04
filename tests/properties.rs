@@ -37,33 +37,29 @@ fn props() {
     impl ObjectImpl for EmptyTraitPrivate {}
     let _ = EmptyTrait::default();
 
-    wrapper!(EmptyProps(EmptyPropsPrivate));
-    #[object_impl]
-    #[derive(Default)]
-    struct EmptyPropsPrivate {
-        #[property]
-        _my_i32: Cell<i32>,
-        #[property]
-        _my_str: RefCell<String>,
-        #[property]
-        _my_mutex: Mutex<i32>,
-        #[property]
-        _my_rw_lock: RwLock<String>,
-    }
-    let empty = EmptyProps::default();
-    assert_eq!(empty.list_properties().len(), 0);
-
     wrapper!(BasicProps(BasicPropsPrivate));
     #[object_impl]
     #[derive(Default)]
     struct BasicPropsPrivate {
         #[property(get, set)]
-        _my_i32: Cell<i32>,
+        my_i32: Cell<i32>,
+        #[property(get, set)]
+        my_str: RefCell<String>,
+        #[property(get, set)]
+        my_mutex: Mutex<i32>,
+        #[property(get, set)]
+        my_rw_lock: RwLock<String>,
     }
 
     let props = BasicProps::default();
-    assert_eq!(props.list_properties().len(), 1);
+    assert_eq!(BasicPropsPrivate::properties().len(), 4);
+    assert_eq!(props.list_properties().len(), 4);
+    props.connect_my_i32_notify(|props| props.set_my_str("Updated".into()));
+    assert_eq!(props.my_str(), "");
     props.set_my_i32(5);
     assert_eq!(props.my_i32(), 5);
     assert_eq!(props.property::<i32>("my-i32"), 5);
+    assert_eq!(props.my_str(), "Updated");
+    assert_eq!(props.property::<String>("my-str"), "Updated");
 }
+

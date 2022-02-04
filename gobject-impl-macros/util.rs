@@ -489,7 +489,9 @@ impl Output {
         for (index, prop) in properties.iter().filter(|p| !p.skip).enumerate() {
             props.push(prop.create(&go));
             let index = index + 1;
-            let trait_name = if prop.public {
+            let trait_name =  if matches!(method_type, OutputMethods::Type(_)) {
+                None
+            } else if prop.public {
                 public_trait
             } else {
                 private_trait
@@ -535,11 +537,11 @@ impl Output {
             methods.push(prop.pspec_definition(index, &trait_name, &glib));
             prototypes.push(make_stmt(prop.connect_prototype(&glib)));
             methods.push(prop.connect_definition(&glib));
-            if let Some(getter) = prop.getter_prototype() {
+            if let Some(getter) = prop.getter_prototype(&go) {
                 prototypes.push(make_stmt(getter));
                 methods.push(prop.getter_definition(&go).expect("no getter definition"));
             }
-            if let Some(setter) = prop.setter_prototype() {
+            if let Some(setter) = prop.setter_prototype(&go) {
                 prototypes.push(make_stmt(setter));
                 methods.push(
                     prop.setter_definition(index, &trait_name, &go)

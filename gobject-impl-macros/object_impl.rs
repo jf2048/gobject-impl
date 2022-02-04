@@ -17,7 +17,6 @@ pub fn object_impl(args: Args, item: proc_macro::TokenStream) -> TokenStream {
     let header = definition.header_tokens();
 
     let ObjectDefinition {
-        attrs,
         definition,
         generics,
         properties,
@@ -90,8 +89,7 @@ pub fn object_impl(args: Args, item: proc_macro::TokenStream) -> TokenStream {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     quote! {
-        #header
-        #(#attrs)* {
+        #header {
             #(#fields),*
         }
         #impl_trait

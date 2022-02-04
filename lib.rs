@@ -241,11 +241,14 @@ impl HasParamSpec for Option<glib::Variant> {
     }
 }
 
-pub trait ParamStoreRead<T: ValueType> {
+pub trait ParamStore {
+    type Type: ValueType;
+}
+pub trait ParamStoreRead: ParamStore {
     fn get_value(&self) -> glib::Value;
 }
-pub trait ParamStoreWrite<T: ValueType> {
-    fn set(&self, value: T) -> bool;
+pub trait ParamStoreWrite: ParamStore {
+    fn set(&self, value: Self::Type) -> bool;
     fn set_value(&self, value: &Value) -> bool {
         let v = value.get_owned().expect("Invalid value for property");
         self.set(v)
@@ -258,12 +261,15 @@ impl<T: HasParamSpec> HasParamSpec for std::cell::Cell<T> {
         T::builder()
     }
 }
-impl<T: ValueType + Copy + HasParamSpec> ParamStoreRead<T> for std::cell::Cell<T> {
+impl<T: ValueType> ParamStore for std::cell::Cell<T> {
+    type Type = T;
+}
+impl<T: ValueType + Copy + HasParamSpec> ParamStoreRead for std::cell::Cell<T> {
     fn get_value(&self) -> glib::Value {
         std::cell::Cell::get(self).to_value()
     }
 }
-impl<T: ValueType + HasParamSpec + PartialEq + Copy> ParamStoreWrite<T> for std::cell::Cell<T> {
+impl<T: ValueType + HasParamSpec + PartialEq + Copy> ParamStoreWrite for std::cell::Cell<T> {
     fn set(&self, value: T) -> bool {
         let old = self.replace(value);
         old != self.get()
@@ -276,12 +282,15 @@ impl<T: HasParamSpec> HasParamSpec for std::cell::RefCell<T> {
         T::builder()
     }
 }
-impl<T: ValueType + HasParamSpec> ParamStoreRead<T> for std::cell::RefCell<T> {
+impl<T: ValueType> ParamStore for std::cell::RefCell<T> {
+    type Type = T;
+}
+impl<T: ValueType + HasParamSpec> ParamStoreRead for std::cell::RefCell<T> {
     fn get_value(&self) -> glib::Value {
         self.borrow().to_value()
     }
 }
-impl<T: ValueType + HasParamSpec + PartialEq> ParamStoreWrite<T> for std::cell::RefCell<T> {
+impl<T: ValueType + HasParamSpec + PartialEq> ParamStoreWrite for std::cell::RefCell<T> {
     fn set(&self, value: T) -> bool {
         let old = self.replace(value);
         old != *self.borrow()
@@ -294,12 +303,15 @@ impl<T: HasParamSpec> HasParamSpec for std::sync::Mutex<T> {
         T::builder()
     }
 }
-impl<T: ValueType + HasParamSpec> ParamStoreRead<T> for std::sync::Mutex<T> {
+impl<T: ValueType> ParamStore for std::sync::Mutex<T> {
+    type Type = T;
+}
+impl<T: ValueType + HasParamSpec> ParamStoreRead for std::sync::Mutex<T> {
     fn get_value(&self) -> glib::Value {
         self.lock().unwrap().to_value()
     }
 }
-impl<T: ValueType + HasParamSpec + PartialEq> ParamStoreWrite<T> for std::sync::Mutex<T> {
+impl<T: ValueType + HasParamSpec + PartialEq> ParamStoreWrite for std::sync::Mutex<T> {
     fn set(&self, value: T) -> bool {
         let mut storage = self.lock().unwrap();
         let old = std::mem::replace(storage.deref_mut(), value);
@@ -313,12 +325,15 @@ impl<T: HasParamSpec> HasParamSpec for std::sync::RwLock<T> {
         T::builder()
     }
 }
-impl<T: ValueType + HasParamSpec> ParamStoreRead<T> for std::sync::RwLock<T> {
+impl<T: ValueType> ParamStore for std::sync::RwLock<T> {
+    type Type = T;
+}
+impl<T: ValueType + HasParamSpec> ParamStoreRead for std::sync::RwLock<T> {
     fn get_value(&self) -> glib::Value {
         self.read().unwrap().to_value()
     }
 }
-impl<T: ValueType + HasParamSpec + PartialEq> ParamStoreWrite<T> for std::sync::RwLock<T> {
+impl<T: ValueType + HasParamSpec + PartialEq> ParamStoreWrite for std::sync::RwLock<T> {
     fn set(&self, value: T) -> bool {
         let mut storage = self.write().unwrap();
         let old = std::mem::replace(storage.deref_mut(), value);

@@ -72,58 +72,30 @@ impl PropertyFlags {
 }
 
 pub enum PropertyType {
-    Unspecified(syn::Type),
-    Enum(Token![enum], syn::Type),
-    Flags(keywords::flags, syn::Type),
-    Boxed(keywords::boxed, syn::Type),
-    Object(keywords::object, syn::Type),
+    Unspecified,
+    Enum(Token![enum]),
+    Flags(keywords::flags),
+    Boxed(keywords::boxed),
+    Object(keywords::object),
     Variant(keywords::variant, Option<syn::LitStr>),
 }
 
 impl Default for PropertyType {
     fn default() -> Self {
-        Self::Unspecified(syn::Type::Verbatim(Default::default()))
+        Self::Unspecified
     }
 }
 
 impl PropertyType {
     pub fn span(&self) -> Option<&Span> {
         Some(match self {
-            PropertyType::Enum(kw, _) => &kw.span,
-            PropertyType::Flags(kw, _) => &kw.span,
-            PropertyType::Boxed(kw, _) => &kw.span,
-            PropertyType::Object(kw, _) => &kw.span,
+            PropertyType::Enum(kw) => &kw.span,
+            PropertyType::Flags(kw) => &kw.span,
+            PropertyType::Boxed(kw) => &kw.span,
+            PropertyType::Object(kw) => &kw.span,
             PropertyType::Variant(kw, _) => &kw.span,
             _ => return None,
         })
-    }
-    pub fn inner_type(&self) -> Option<&syn::Type> {
-        let ty = match self {
-            PropertyType::Unspecified(ty) => ty,
-            PropertyType::Enum(_, ty) => ty,
-            PropertyType::Flags(_, ty) => ty,
-            PropertyType::Boxed(_, ty) => ty,
-            PropertyType::Object(_, ty) => ty,
-            PropertyType::Variant(_, _) => return None,
-        };
-        let path = match ty {
-            syn::Type::Path(syn::TypePath { path, .. }) => path,
-            _ => return None,
-        };
-        let seg = path.segments.last()?;
-        let bracketed = match &seg.arguments {
-            syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
-                args,
-                ..
-            }) => args,
-            _ => return None,
-        };
-        let arg = bracketed.last()?;
-        let ty = match arg {
-            syn::GenericArgument::Type(ty) => ty,
-            _ => return None,
-        };
-        Some(ty)
     }
 }
 
@@ -155,11 +127,6 @@ pub struct Property {
 
 impl Property {
     pub fn create(&self, go: &syn::Ident) -> TokenStream {
-        todo!("
-            - fix prop getter/setter generation in interfaces
-            - change PropertyType::inner_type to not parse generics
-            - figure out what to do about nullable
-          ");
         let glib = quote! { #go::glib };
         let name = self.name();
         if let Some(iface) = &self.override_ {
@@ -172,8 +139,12 @@ impl Property {
         let flags = self
             .flags
             .tokens(&glib, self.get.is_some(), self.set.is_some());
+        let ty = &self.field.as_ref().expect("no field").ty;
+        let static_type = quote! {
+            <<<#ty as #go::ParamStore>::Type as #glib::value::ValueType>::Type as #glib::StaticType>::static_type(),
+        };
         match &self.type_ {
-            PropertyType::Unspecified(ty) => {
+            PropertyType::Unspecified => {
                 let minimum = self.minimum.as_ref().map(|d| quote! { .minimum(#d) });
                 let maximum = self.maximum.as_ref().map(|d| quote! { .maximum(#d) });
                 let default = self.default.as_ref().map(|d| quote! { .default(#d) });
@@ -185,7 +156,7 @@ impl Property {
                     .build(#name, #nick, #blurb, #flags)
                 }
             }
-            PropertyType::Enum(_, ty) => {
+            PropertyType::Enum(_) => {
                 let default = self
                     .default
                     .as_ref()
@@ -194,13 +165,13 @@ impl Property {
                 quote! {
                     #glib::ParamSpecEnum::new(
                         #name, #nick, #blurb,
-                        <#ty as #glib::StaticType>::static_type(),
+                        #static_type,
                         #default,
                         #flags
                     )
                 }
             }
-            PropertyType::Flags(_, ty) => {
+            PropertyType::Flags(_) => {
                 let default = self
                     .default
                     .as_ref()
@@ -209,23 +180,23 @@ impl Property {
                 quote! {
                     #glib::ParamSpecFlags::new(
                         #name, #nick, #blurb,
-                        <#ty as #glib::StaticType>::static_type(),
+                        #static_type,
                         #default,
                         #flags
                     )
                 }
             }
-            PropertyType::Boxed(_, ty) => quote! {
+            PropertyType::Boxed(_) => quote! {
                 #glib::ParamSpecBoxed::new(
                     #name, #nick, #blurb,
-                    <#ty as #glib::StaticType>::static_type(),
+                    #static_type,
                     #flags
                 )
             },
-            PropertyType::Object(_, ty) => quote! {
+            PropertyType::Object(_) => quote! {
                 #glib::ParamSpecObject::new(
                     #name, #nick, #blurb,
-                    <#ty as #glib::StaticType>::static_type(),
+                    #static_type,
                     #flags
                 )
             },
@@ -256,6 +227,10 @@ impl Property {
                     .to_string()
                     .to_kebab_case()
             })
+    }
+    fn inner_type(&self, go: &syn::Ident) -> TokenStream {
+        let ty = &self.field.as_ref().expect("no field for inner type").ty;
+        quote! { <#ty as #go::ParamStore>::Type }
     }
     fn field_storage(&self, go: Option<&syn::Ident>) -> TokenStream {
         if let Some(PropertyVirtual::Delegate(delegate)) = &self.virtual_ {
@@ -311,18 +286,18 @@ impl Property {
             }
         })
     }
-    pub fn getter_prototype(&self) -> Option<TokenStream> {
+    pub fn getter_prototype(&self, go: &syn::Ident) -> Option<TokenStream> {
         matches!(self.get, Some(None)).then(|| {
             let method_name = format_ident!("{}", self.name().to_snake_case());
-            let ty = self.type_.inner_type().expect("no inner type");
+            let ty = self.inner_type(go);
             quote! { fn #method_name(&self) -> #ty }
         })
     }
     pub fn getter_definition(&self, go: &syn::Ident) -> Option<TokenStream> {
         matches!(self.get, Some(None)).then(|| {
-            let proto = self.getter_prototype().expect("no proto for getter");
+            let proto = self.getter_prototype(go).expect("no proto for getter");
             let field = self.field_storage(Some(&go));
-            let ty = self.type_.inner_type().expect("no inner type for getter");
+            let ty = self.inner_type(go);
             quote! {
                 #proto {
                     #go::ParamStoreRead::get_value(&#field).get::<#ty>().unwrap()
@@ -337,7 +312,7 @@ impl Property {
         go: &syn::Ident,
     ) -> Option<TokenStream> {
         self.set.as_ref().map(|expr| {
-            let ty = self.type_.inner_type().expect("no inner type for set impl");
+            let ty = self.inner_type(go);
             let set = if let Some(expr) = &expr {
                 quote! { #expr(value.get::<#ty>().unwrap()); }
             } else if self.flags.contains(PropertyFlags::EXPLICIT_NOTIFY) {
@@ -351,13 +326,10 @@ impl Property {
             quote! { #index => { #set; } }
         })
     }
-    pub fn setter_prototype(&self) -> Option<TokenStream> {
+    pub fn setter_prototype(&self, go: &syn::Ident) -> Option<TokenStream> {
         matches!(self.set, Some(None)).then(|| {
             let method_name = format_ident!("set_{}", self.name().to_snake_case());
-            let ty = self
-                .type_
-                .inner_type()
-                .expect("no inner type for setter proto");
+            let ty = self.inner_type(go);
             quote! { fn #method_name(&self, value: #ty) }
         })
     }
@@ -368,7 +340,7 @@ impl Property {
         go: &syn::Ident,
     ) -> Option<TokenStream> {
         matches!(self.set, Some(None)).then(|| {
-            let proto = self.setter_prototype().expect("no setter proto");
+            let proto = self.setter_prototype(go).expect("no setter proto");
             let body = if self.flags.contains(PropertyFlags::EXPLICIT_NOTIFY) {
                 let field = self.field_storage(Some(&go));
                 quote! {
@@ -377,9 +349,9 @@ impl Property {
                     }
                 }
             } else {
-                let name = self.name.as_ref().expect("no name for setter definition");
+                let name = self.name();
                 quote! {
-                    self.set_property(#name, #go::glib::ToValue::to_value(&value));
+                    self.set_property(#name, value);
                 }
             };
             quote! {
@@ -431,7 +403,7 @@ impl Property {
     }
     pub fn connect_definition(&self, glib: &TokenStream) -> TokenStream {
         let proto = self.connect_prototype(glib);
-        let name = self.name.as_ref().expect("no name for connect");
+        let name = self.name();
         quote! {
             #proto {
                 self.connect_notify_local(
@@ -446,7 +418,7 @@ impl Property {
             field: None,
             public: !matches!(&field.vis, syn::Visibility::Inherited),
             skip: !pod,
-            type_: PropertyType::Unspecified(field.ty.clone()),
+            type_: PropertyType::Unspecified,
             notify_public: false,
             virtual_: None,
             nullable: None,
@@ -584,8 +556,8 @@ impl Property {
                 prop.default.replace(input.parse::<syn::Lit>()?);
             } else if lookahead.peek(Token![enum]) {
                 let kw = input.parse::<Token![enum]>()?;
-                if let PropertyType::Unspecified(ty) = std::mem::take(&mut prop.type_) {
-                    prop.type_ = PropertyType::Enum(kw, ty);
+                if matches!(prop.type_, PropertyType::Unspecified) {
+                    prop.type_ = PropertyType::Enum(kw);
                 } else {
                     return Err(syn::Error::new_spanned(
                         kw,
@@ -594,8 +566,8 @@ impl Property {
                 }
             } else if lookahead.peek(keywords::flags) {
                 let kw = input.parse::<keywords::flags>()?;
-                if let PropertyType::Unspecified(ty) = std::mem::take(&mut prop.type_) {
-                    prop.type_ = PropertyType::Flags(kw, ty);
+                if matches!(prop.type_, PropertyType::Unspecified) {
+                    prop.type_ = PropertyType::Flags(kw);
                 } else {
                     return Err(syn::Error::new_spanned(
                         kw,
@@ -604,8 +576,8 @@ impl Property {
                 }
             } else if lookahead.peek(keywords::boxed) {
                 let kw = input.parse::<keywords::boxed>()?;
-                if let PropertyType::Unspecified(ty) = std::mem::take(&mut prop.type_) {
-                    prop.type_ = PropertyType::Boxed(kw, ty);
+                if matches!(prop.type_, PropertyType::Unspecified) {
+                    prop.type_ = PropertyType::Boxed(kw);
                 } else {
                     return Err(syn::Error::new_spanned(
                         kw,
@@ -614,8 +586,8 @@ impl Property {
                 }
             } else if lookahead.peek(keywords::object) {
                 let kw = input.parse::<keywords::object>()?;
-                if let PropertyType::Unspecified(ty) = std::mem::take(&mut prop.type_) {
-                    prop.type_ = PropertyType::Object(kw, ty);
+                if matches!(prop.type_, PropertyType::Unspecified) {
+                    prop.type_ = PropertyType::Object(kw);
                 } else {
                     return Err(syn::Error::new_spanned(
                         kw,
@@ -624,7 +596,7 @@ impl Property {
                 }
             } else if lookahead.peek(keywords::variant) {
                 let kw = input.parse::<keywords::variant>()?;
-                if let PropertyType::Unspecified(_) = &prop.type_ {
+                if matches!(prop.type_, PropertyType::Unspecified) {
                     if input.peek(Token![=]) {
                         input.parse::<Token![=]>()?;
                         let element = input.parse::<syn::LitStr>()?;
@@ -745,7 +717,7 @@ impl Property {
         if let Some(nullable) = &prop.nullable {
             if !matches!(
                 &prop.type_,
-                PropertyType::Object(_, _) | PropertyType::Boxed(_, _) | PropertyType::Variant(_, _)
+                PropertyType::Object(_) | PropertyType::Boxed(_) | PropertyType::Variant(_, _)
             ) {
                 return Err(syn::Error::new_spanned(nullable, "`nullable` only allowed on properties of type `object`, `boxed`, or `variant`"));
             }
