@@ -1,7 +1,7 @@
 use heck::ToKebabCase;
 use proc_macro2::TokenStream;
 use quote::{quote, ToTokens};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use syn::{parse::Parse, Token};
 
 use super::property::*;
@@ -16,6 +16,23 @@ pub fn go_crate_ident() -> syn::Ident {
     };
 
     syn::Ident::new(&crate_name, proc_macro2::Span::call_site())
+}
+
+pub fn is_valid_name(name: &str) -> bool {
+    let mut iter = name.chars();
+    if let Some(c) = iter.next() {
+        if !c.is_ascii_alphabetic() {
+            return false;
+        }
+        for c in iter {
+            if !c.is_ascii_alphanumeric() && c != '-' && c != '_' {
+                return false;
+            }
+        }
+        true
+    } else {
+        false
+    }
 }
 
 #[inline]
@@ -142,7 +159,7 @@ pub struct ObjectDefinition {
     pub definition: DefinitionType,
     pub generics: syn::Generics,
     pub properties: Vec<Property>,
-    pub signals: HashMap<String, Signal>,
+    pub signals: Vec<Signal>,
     pub methods: Vec<syn::ImplItemMethod>,
     pub types: Vec<syn::ImplItemType>,
     pub consts: Vec<syn::ImplItemConst>,
@@ -252,8 +269,9 @@ impl ObjectDefinition {
         syn::braced!(content in input);
         attrs.append(&mut input.call(syn::Attribute::parse_inner)?);
 
-        let mut properties = vec![];
-        let mut signals = HashMap::<String, Signal>::new();
+        let mut properties = HashMap::<String, Property>::new();
+        let mut signal_names = HashSet::<String>::new();
+        let mut signals = HashMap::<syn::Ident, Signal>::new();
         let mut methods = vec![];
         let mut types = vec![];
         let mut consts = vec![];
@@ -290,17 +308,19 @@ impl ObjectDefinition {
                     content.parse::<Token![;]>()?;
                 }
 
-                let signal = signals.entry(name.to_owned()).or_default();
-                if signal.inputs.is_some() {
+                if signal_names.contains(&name) {
                     return Err(syn::Error::new_spanned(
                         ident,
                         format!("Duplicate definition for signal `{}`", name),
                     ));
                 }
-                if let Some(attrs) = signal_attrs {
+                signal_names.insert(name.clone());
+                let signal = signals.entry(ident.clone()).or_default();
+                if let Some(attrs) = &signal_attrs {
                     signal.flags = attrs.flags;
                     signal.emit_public = attrs.emit_public;
                 }
+                signal.name = name;
                 signal.public = match vis {
                     syn::Visibility::Inherited => false,
                     syn::Visibility::Public(_) => true,
@@ -314,6 +334,20 @@ impl ObjectDefinition {
                 signal.inputs = Some(inputs);
                 signal.output = output;
                 signal.block = block;
+
+                if !is_valid_name(&signal.name) {
+                    if let Some(name) = signal_attrs.as_ref().and_then(|s| s.name.as_ref()) {
+                        return Err(syn::Error::new_spanned(
+                            &name,
+                            format!("Invalid signal name '{}'. Signal names must start with an ASCII letter and only contain ASCII letters, numbers, '-' or '_'", name),
+                        ));
+                    } else {
+                        return Err(syn::Error::new_spanned(
+                            &ident,
+                            format!("Invalid signal name '{}'. Signal names must start with an ASCII letter and only contain ASCII letters, numbers, '-' or '_'", ident),
+                        ));
+                    }
+                }
             } else if content.peek(signal::keywords::signal_accumulator)
                 && content.peek2(syn::Ident)
             {
@@ -325,20 +359,6 @@ impl ObjectDefinition {
                     ));
                 }
                 let ident: syn::Ident = content.call(syn::ext::IdentExt::parse_any)?;
-                let mut acc_attrs = None;
-                for attr in attrs {
-                    if acc_attrs.is_some() {
-                        return Err(syn::Error::new_spanned(
-                            attr,
-                            "Only one attribute allowed on signal_accumulator",
-                        ));
-                    }
-                    acc_attrs = Some(syn::parse2::<SignalAccumulatorAttrs>(attr.tokens)?);
-                }
-                let name = acc_attrs
-                    .as_ref()
-                    .and_then(|a| a.name.to_owned())
-                    .unwrap_or_else(|| ident.to_string().to_kebab_case());
                 let inputs = parse_args(&content)?;
                 let output = content.parse::<syn::ReturnType>()?;
                 if matches!(output, syn::ReturnType::Default) {
@@ -349,13 +369,13 @@ impl ObjectDefinition {
                 }
                 let block = Box::new(input.parse::<syn::Block>()?);
 
-                let signal = signals.entry(name.to_owned()).or_default();
+                let signal = signals.entry(ident.clone()).or_default();
                 if signal.accumulator.is_some() {
                     return Err(syn::Error::new_spanned(
-                        ident,
+                        &ident,
                         format!(
-                            "Duplicate definition for signal_accumulator on signal `{}`",
-                            name
+                            "Duplicate definition for signal_accumulator on signal definition `{}`",
+                            ident
                         ),
                     ));
                 }
@@ -376,26 +396,36 @@ impl ObjectDefinition {
                 c.vis = vis;
                 consts.push(c);
             } else {
-                let ident = Some(if content.peek(Token![_]) {
+                let ident: syn::Ident = if content.peek(Token![_]) {
                     content.call(syn::ext::IdentExt::parse_any)
                 } else {
                     content.parse()
-                }?);
+                }?;
                 let field = syn::Field {
                     attrs,
                     vis,
-                    ident,
+                    ident: Some(ident.clone()),
                     colon_token: Some(content.parse()?),
                     ty: content.parse()?,
                 };
                 let prop = Property::parse(field, pod)?;
-                properties.push(prop);
+                let name = prop.name();
+                if properties.contains_key(&name) {
+                        return Err(syn::Error::new_spanned(
+                            &ident,
+                            format!("Duplicate definition for property `{}`", name),
+                        ));
+                }
+                properties.insert(name, prop);
                 if content.is_empty() {
                     break;
                 }
                 content.parse::<Token![,]>()?;
             }
         }
+
+        let properties = properties.into_values().collect();
+        let signals = signals.into_values().collect();
 
         Ok(ObjectDefinition {
             attrs,
@@ -427,7 +457,7 @@ pub struct Output {
 
 impl Output {
     pub fn new(
-        signals: &HashMap<String, Signal>,
+        signals: &Vec<Signal>,
         properties: &Vec<Property>,
         method_type: OutputMethods,
         trait_name: &TokenStream,
@@ -448,7 +478,7 @@ impl Output {
         } else {
             let signals = signals
                 .iter()
-                .map(|(name, signal)| signal.create(name, &glib));
+                .map(|signal| signal.create(&glib));
             quote! {
                 static SIGNALS: #glib::once_cell::sync::Lazy<::std::vec::Vec<#glib::subclass::Signal>> = #glib::once_cell::sync::Lazy::new(|| {
                     vec![
@@ -459,26 +489,26 @@ impl Output {
             }
         };
 
-        for (index, (name, signal)) in signals.iter().enumerate() {
+        for (index, signal) in signals.iter().enumerate() {
             let (prototypes, methods) = if signal.emit_public {
                 (&mut public_prototypes, &mut public_methods)
             } else {
                 (&mut private_prototypes, &mut private_methods)
             };
-            prototypes.push(make_stmt(signal.emit_prototype(name, &glib)));
-            methods.push(signal.emit_definition(index, name, &trait_name, &glib));
+            prototypes.push(make_stmt(signal.emit_prototype(&glib)));
+            methods.push(signal.emit_definition(index, &trait_name, &glib));
 
             let (prototypes, methods) = if signal.public {
                 (&mut public_prototypes, &mut public_methods)
             } else {
                 (&mut private_prototypes, &mut private_methods)
             };
-            prototypes.push(make_stmt(signal.signal_prototype(name, &glib)));
-            methods.push(signal.signal_definition(index, name, &trait_name, &glib));
-            prototypes.push(make_stmt(signal.connect_prototype(name, &glib)));
-            methods.push(signal.connect_definition(index, name, &trait_name, &glib));
+            prototypes.push(make_stmt(signal.signal_prototype(&glib)));
+            methods.push(signal.signal_definition(index, &trait_name, &glib));
+            prototypes.push(make_stmt(signal.connect_prototype(&glib)));
+            methods.push(signal.connect_definition(index, &trait_name, &glib));
 
-            if let Some(method) = signal.handler_definition(name) {
+            if let Some(method) = signal.handler_definition() {
                 private_impl_methods.push(method);
             }
         }

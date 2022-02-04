@@ -104,6 +104,11 @@ pub enum PropertyVirtual {
     Delegate(Box<syn::Expr>),
 }
 
+pub enum PropertyName {
+    Field(syn::Ident),
+    Custom(syn::LitStr)
+}
+
 pub struct Property {
     pub field: Option<syn::Field>,
     pub public: bool,
@@ -115,7 +120,7 @@ pub struct Property {
     pub override_: Option<syn::Type>,
     pub get: Option<Option<syn::Path>>,
     pub set: Option<Option<syn::Path>>,
-    pub name: Option<syn::LitStr>,
+    pub name: PropertyName,
     pub nick: Option<syn::LitStr>,
     pub blurb: Option<syn::LitStr>,
     pub minimum: Option<syn::Lit>,
@@ -212,21 +217,17 @@ impl Property {
             }
         }
     }
-    fn name(&self) -> String {
-        self.name
-            .as_ref()
-            .map(|n| n.value())
-            .unwrap_or_else(|| {
-                self
-                    .field
-                    .as_ref()
-                    .expect("no field")
-                    .ident
-                    .as_ref()
-                    .expect("no field ident")
-                    .to_string()
-                    .to_kebab_case()
-            })
+    pub fn name(&self) -> String {
+        match &self.name {
+            PropertyName::Field(name) => name.to_string().to_kebab_case(),
+            PropertyName::Custom(name) => name.value()
+        }
+    }
+    pub fn name_span(&self) -> Span {
+        match &self.name {
+            PropertyName::Field(name) => name.span(),
+            PropertyName::Custom(name) => name.span()
+        }
     }
     fn inner_type(&self, go: &syn::Ident) -> TokenStream {
         let ty = &self.field.as_ref().expect("no field for inner type").ty;
@@ -425,7 +426,7 @@ impl Property {
             override_: None,
             get: pod.then(|| None),
             set: pod.then(|| None),
-            name: None,
+            name: PropertyName::Field(field.ident.clone().expect("no field ident")),
             nick: None,
             blurb: None,
             minimum: None,
@@ -514,11 +515,11 @@ impl Property {
                 }
             } else if lookahead.peek(keywords::name) {
                 let kw = input.parse::<keywords::name>()?;
-                if prop.name.is_some() {
+                if matches!(prop.name, PropertyName::Custom(_)) {
                     return Err(syn::Error::new_spanned(kw, "Duplicate `name` attribute"));
                 }
                 input.parse::<Token![=]>()?;
-                prop.name.replace(input.parse::<syn::LitStr>()?);
+                prop.name = PropertyName::Custom(input.parse::<syn::LitStr>()?);
             } else if lookahead.peek(keywords::nick) {
                 let kw = input.parse::<keywords::nick>()?;
                 if prop.nick.is_some() {
@@ -705,6 +706,13 @@ impl Property {
         }
 
         // validation
+        let name = prop.name();
+        if !super::is_valid_name(&name) {
+            return Err(syn::Error::new(
+                prop.name_span(),
+                format!("Invalid property name '{}'. Property names must start with an ASCII letter and only contain ASCII letters, numbers, '-' or '_'", name),
+            ))
+        }
         match &field.vis {
             syn::Visibility::Inherited | syn::Visibility::Public(_) => {}
             vis => {
@@ -723,13 +731,13 @@ impl Property {
             }
         }
         if let Some(_) = &prop.override_ {
-            if let Some(nick) = &prop.name {
+            if let Some(nick) = &prop.nick {
                 return Err(syn::Error::new_spanned(nick, "`nick` not allowed on override property"));
             }
-            if let Some(blurb) = &prop.name {
+            if let Some(blurb) = &prop.blurb {
                 return Err(syn::Error::new_spanned(blurb, "`blurb` not allowed on override property"));
             }
-            if let Some(minimum) = &prop.name {
+            if let Some(minimum) = &prop.minimum {
                 return Err(syn::Error::new_spanned(minimum, "`minimum` not allowed on override property"));
             }
             if let Some(maximum) = &prop.maximum {
