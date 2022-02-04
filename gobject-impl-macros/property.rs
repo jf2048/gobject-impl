@@ -21,7 +21,7 @@ mod keywords {
     syn::custom_keyword!(boxed);
     syn::custom_keyword!(object);
     syn::custom_keyword!(variant);
-    syn::custom_keyword!(delegate);
+    syn::custom_keyword!(storage);
     syn::custom_keyword!(notify);
 
     syn::custom_keyword!(construct);
@@ -667,16 +667,16 @@ impl Property {
                 if !matches!(prop.storage, PropertyStorage::Field(_)) {
                     return Err(syn::Error::new_spanned(
                         kw,
-                        "Only one of `delegate`, `virtual` is allowed",
+                        "Only one of `storage`, `virtual` is allowed",
                     ));
                 }
                 prop.storage = PropertyStorage::Virtual(kw);
-            } else if !iface && lookahead.peek(keywords::delegate) {
-                let kw = input.parse::<keywords::delegate>()?;
+            } else if !iface && lookahead.peek(keywords::storage) {
+                let kw = input.parse::<keywords::storage>()?;
                 if !matches!(prop.storage, PropertyStorage::Field(_)) {
                     return Err(syn::Error::new_spanned(
                         kw,
-                        "Only one of `delegate`, `virtual` is allowed",
+                        "Only one of `storage`, `virtual` is allowed",
                     ));
                 }
                 input.parse::<Token![=]>()?;
