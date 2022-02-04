@@ -22,7 +22,6 @@ mod keywords {
     syn::custom_keyword!(object);
     syn::custom_keyword!(variant);
     syn::custom_keyword!(delegate);
-    syn::custom_keyword!(nullable);
     syn::custom_keyword!(notify);
 
     syn::custom_keyword!(construct);
@@ -116,7 +115,6 @@ pub struct Property {
     pub type_: PropertyType,
     pub notify_public: bool,
     pub virtual_: Option<PropertyVirtual>,
-    pub nullable: Option<keywords::nullable>,
     pub override_: Option<syn::Type>,
     pub get: Option<Option<syn::Path>>,
     pub set: Option<Option<syn::Path>>,
@@ -422,7 +420,6 @@ impl Property {
             type_: PropertyType::Unspecified,
             notify_public: false,
             virtual_: None,
-            nullable: None,
             override_: None,
             get: pod.then(|| None),
             set: pod.then(|| None),
@@ -611,15 +608,6 @@ impl Property {
                         "Only one of `enum`, `flags`, `boxed`, `object`, `variant` is allowed",
                     ));
                 }
-            } else if lookahead.peek(keywords::nullable) {
-                let kw = input.parse::<keywords::nullable>()?;
-                if prop.nullable.is_some() {
-                    return Err(syn::Error::new_spanned(
-                        kw,
-                        "Duplicate `nullable` attribute",
-                    ));
-                }
-                prop.nullable = Some(kw);
             } else if lookahead.peek(Token![override]) {
                 let kw = input.parse::<Token![override]>()?;
                 if prop.override_.is_some() {
@@ -722,14 +710,6 @@ impl Property {
                 ))
             }
         };
-        if let Some(nullable) = &prop.nullable {
-            if !matches!(
-                &prop.type_,
-                PropertyType::Object(_) | PropertyType::Boxed(_) | PropertyType::Variant(_, _)
-            ) {
-                return Err(syn::Error::new_spanned(nullable, "`nullable` only allowed on properties of type `object`, `boxed`, or `variant`"));
-            }
-        }
         if let Some(_) = &prop.override_ {
             if let Some(nick) = &prop.nick {
                 return Err(syn::Error::new_spanned(nick, "`nick` not allowed on override property"));
