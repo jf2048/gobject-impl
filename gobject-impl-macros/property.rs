@@ -552,9 +552,9 @@ impl Property {
                         "`notify` not allowed on override property",
                     ));
                 }
-                if let Some(connet_notify) = &prop.no_connect_notify {
+                if let Some(connect_notify) = &prop.no_connect_notify {
                     return Err(syn::Error::new_spanned(
-                        connet_notify,
+                        connect_notify,
                         "`connect_notify` not allowed on override property",
                     ));
                 }
@@ -581,6 +581,15 @@ impl Property {
                     .and_then(|i| i.as_ref().map(|i| i.to_string()));
                 if matches!(setter.as_deref(), Some("_")) {
                     prop.set.replace(Some(prop.setter_name()));
+                }
+                if matches!(prop.set, Some(Some(_)))
+                    && prop.get.is_some()
+                    && !prop.flags.contains(PropertyFlags::EXPLICIT_NOTIFY)
+                {
+                    return Err(syn::Error::new_spanned(
+                        prop.ty,
+                        "readwrite property with custom setter must have `explicit_notify` attribute",
+                    ));
                 }
             }
         }

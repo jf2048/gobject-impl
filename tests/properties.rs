@@ -43,12 +43,14 @@ fn props() {
                 my_mutex: Mutex<i32>,
                 #[property(get, set)]
                 my_rw_lock: RwLock<String>,
-                #[property(virtual, get, set)]
+                #[property(get, set, explicit_notify)]
+                my_explicit: Cell<u64>,
+                #[property(get = _, set = _, explicit_notify)]
+                my_custom_accessors: RefCell<String>,
+                #[property(virtual, get, set, explicit_notify)]
                 my_computed_prop: i32,
                 #[property(get, set, storage = inner.my_bool)]
                 my_delegate: Cell<bool>,
-                #[property(get, set, explicit_notify)]
-                my_explicit: Cell<u64>,
                 #[property(get, set, !notify, !connect_notify)]
                 my_no_defaults: Cell<u64>,
 
@@ -62,6 +64,15 @@ fn props() {
     }
 
     impl BasicProps {
+        pub fn my_custom_accessors(&self) -> String {
+            self.imp().my_custom_accessors.borrow().clone()
+        }
+        pub fn set_my_custom_accessors(&self, value: String) {
+            let old = self.imp().my_custom_accessors.replace(value);
+            if old != *self.imp().my_custom_accessors.borrow() {
+                self.notify_my_custom_accessors();
+            }
+        }
         pub fn my_computed_prop(&self) -> i32 {
             self.my_i32() + 7
         }
@@ -71,8 +82,8 @@ fn props() {
     }
 
     let props = BasicProps::default();
-    assert_eq!(BasicPropsPrivate::properties().len(), 8);
-    assert_eq!(props.list_properties().len(), 8);
+    assert_eq!(BasicPropsPrivate::properties().len(), 9);
+    assert_eq!(props.list_properties().len(), 9);
     props.connect_my_i32_notify(|props| props.set_my_str("Updated".into()));
     assert_eq!(props.my_str(), "");
     props.set_my_i32(5);
