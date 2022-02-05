@@ -24,12 +24,10 @@ macro_rules! wrapper {
 
 #[test]
 fn props() {
-    wrapper!(Empty(EmptyPrivate));
     #[derive(Default)]
-    pub struct EmptyPrivate {}
-    #[object_impl(trait = EmptyExt)]
-    impl ObjectImpl for EmptyPrivate {}
-    let _ = Empty::default();
+    struct BasicPropsInner {
+        my_bool: Cell<bool>,
+    }
 
     wrapper!(BasicProps(BasicPropsPrivate));
     #[object_impl(trait = BasicPropsExt)]
@@ -45,7 +43,28 @@ fn props() {
                 my_mutex: Mutex<i32>,
                 #[property(get, set)]
                 my_rw_lock: RwLock<String>,
+                #[property(virtual, get, set)]
+                my_computed_prop: i32,
+                #[property(get, set, storage = inner.my_bool)]
+                my_delegate: Cell<bool>,
+                #[property(get, set, explicit_notify)]
+                my_explicit: Cell<u64>,
+
+                inner: BasicPropsInner
             }
+        }
+        fn constructed(&self, obj: &Self::Type) {
+            self.parent_constructed(obj);
+            obj.connect_my_i32_notify(|obj| obj.notify_my_computed_prop());
+        }
+    }
+
+    impl BasicProps {
+        pub fn my_computed_prop(&self) -> i32 {
+            self.my_i32() + 7
+        }
+        pub fn set_my_computed_prop(&self, value: i32) {
+            self.set_my_i32(value - 7);
         }
     }
 

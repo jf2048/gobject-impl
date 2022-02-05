@@ -121,8 +121,8 @@ pub struct Property {
     pub special_type: PropertyType,
     pub storage: PropertyStorage,
     pub override_: Option<syn::Type>,
-    pub get: Option<Option<syn::Path>>,
-    pub set: Option<Option<syn::Path>>,
+    pub get: Option<Option<syn::Ident>>,
+    pub set: Option<Option<syn::Ident>>,
     pub notify: bool,
     pub connect_notify: bool,
     pub name: PropertyName,
@@ -217,12 +217,6 @@ impl Property {
         } else {
             Self::new(&field, pod, iface)
         };
-        if prop.get.is_none() && prop.set.is_none() {
-            return Err(syn::Error::new_spanned(
-                field.ident.as_ref().expect("no field ident"),
-                "Property must have at least one of `get` and `set`",
-            ));
-        }
         Ok(prop)
     }
     fn parse_attr(
@@ -506,67 +500,55 @@ impl Property {
         }
 
         // validation
-        let name = prop.name();
-        if !is_valid_name(&name) {
-            return Err(syn::Error::new(prop.name_span(), format!("Invalid property name '{}'. Property names must start with an ASCII letter and only contain ASCII letters, numbers, '-' or '_'", name)));
-        }
-        if prop.override_.is_some() {
-            if let Some(nick) = &prop.nick {
+        if !prop.skip {
+            let name = prop.name();
+            if !is_valid_name(&name) {
+                return Err(syn::Error::new(prop.name_span(), format!("Invalid property name '{}'. Property names must start with an ASCII letter and only contain ASCII letters, numbers, '-' or '_'", name)));
+            }
+            if prop.get.is_none() && prop.set.is_none() {
                 return Err(syn::Error::new_spanned(
-                    nick,
-                    "`nick` not allowed on override property",
+                    field.ident.as_ref().expect("no field ident"),
+                    "Property must have at least one of `get` and `set`",
                 ));
             }
-            if let Some(blurb) = &prop.blurb {
-                return Err(syn::Error::new_spanned(
-                    blurb,
-                    "`blurb` not allowed on override property",
-                ));
-            }
-            if let Some((ident, _)) = prop.buildable_props.first() {
-                return Err(syn::Error::new_spanned(
-                    ident,
-                    format!("`{}` not allowed on override property", ident),
-                ));
-            }
-            if let Some(flag) = prop.flag_spans.first() {
-                return Err(syn::Error::new(
-                    *flag,
-                    "flag not allowed on override property",
-                ));
-            }
-            if let Some(span) = prop.special_type.span() {
-                return Err(syn::Error::new(
-                    *span,
-                    "type specifier not allowed on override property",
-                ));
-            }
-        }
-        if let PropertyStorage::Virtual(virtual_kw) = &prop.storage {
-            if matches!(prop.get, Some(None)) {
-                if pod {
+            if prop.override_.is_some() {
+                if let Some(nick) = &prop.nick {
                     return Err(syn::Error::new_spanned(
-                        virtual_kw,
-                        "custom getter or `!get` required for virtual property",
+                        nick,
+                        "`nick` not allowed on override property",
                     ));
-                } else {
+                }
+                if let Some(blurb) = &prop.blurb {
                     return Err(syn::Error::new_spanned(
-                        virtual_kw,
-                        "custom getter required for readable virtual property",
+                        blurb,
+                        "`blurb` not allowed on override property",
+                    ));
+                }
+                if let Some((ident, _)) = prop.buildable_props.first() {
+                    return Err(syn::Error::new_spanned(
+                        ident,
+                        format!("`{}` not allowed on override property", ident),
+                    ));
+                }
+                if let Some(flag) = prop.flag_spans.first() {
+                    return Err(syn::Error::new(
+                        *flag,
+                        "flag not allowed on override property",
+                    ));
+                }
+                if let Some(span) = prop.special_type.span() {
+                    return Err(syn::Error::new(
+                        *span,
+                        "type specifier not allowed on override property",
                     ));
                 }
             }
-            if matches!(prop.set, Some(None)) {
-                if pod {
-                    return Err(syn::Error::new_spanned(
-                        virtual_kw,
-                        "custom setter or `!set` required for virtual property",
-                    ));
-                } else {
-                    return Err(syn::Error::new_spanned(
-                        virtual_kw,
-                        "custom setter required for writable virtual property",
-                    ));
+            if let PropertyStorage::Virtual(_) = &prop.storage {
+                if matches!(prop.get, Some(None)) {
+                    prop.get.replace(Some(format_ident!("{}", prop.name().to_snake_case())));
+                }
+                if matches!(prop.set, Some(None)) {
+                    prop.set.replace(Some(format_ident!("set_{}", prop.name().to_snake_case())));
                 }
             }
         }
@@ -643,7 +625,7 @@ impl Property {
     }
     fn inner_type(&self, go: &syn::Ident) -> TokenStream {
         let ty = &self.ty;
-        if self.is_interface() {
+        if self.is_interface() || matches!(self.storage, PropertyStorage::Virtual(_)) {
             quote! { #ty }
         } else {
             quote! { <#ty as #go::ParamStore>::Type }
@@ -653,20 +635,18 @@ impl Property {
         matches!(self.storage, PropertyStorage::Interface)
     }
     fn field_storage(&self, object_type: Option<&TokenStream>, go: &syn::Ident) -> TokenStream {
-        match &self.storage {
-            PropertyStorage::Field(field) => {
-                let recv = if let Some(object_type) = object_type {
-                    quote! {
-                        #go::glib::subclass::prelude::ObjectSubclassIsExt::imp(
-                            self.upcast_ref::<#object_type>()
-                        )
-                    }
-                } else {
-                    quote! { self }
-                };
-                quote! { #recv.#field }
+        let recv = if let Some(object_type) = object_type {
+            quote! {
+                #go::glib::subclass::prelude::ObjectSubclassIsExt::imp(
+                    self.upcast_ref::<#object_type>()
+                )
             }
-            PropertyStorage::Delegate(delegate) => quote! { #delegate },
+        } else {
+            quote! { self }
+        };
+        match &self.storage {
+            PropertyStorage::Field(field) => quote! { #recv.#field },
+            PropertyStorage::Delegate(delegate) => quote! { #recv.#delegate },
             _ => unreachable!("cannot get storage for interface/virtual property"),
         }
     }
@@ -690,10 +670,10 @@ impl Property {
         if self.is_interface() {
             return None;
         }
-        self.get.as_ref().map(|expr| {
+        self.get.as_ref().map(|method| {
             let glib = quote! { #go::glib };
-            let expr = if let Some(expr) = expr {
-                quote! { #glib::ToValue::to_value(&#expr()) }
+            let expr = if let Some(method) = method {
+                quote! { #glib::ToValue::to_value(&obj.#method()) }
             } else if let Some(trait_name) = trait_name {
                 let method_name = format_ident!("{}", self.name().to_snake_case());
                 let call = Self::method_call(&method_name, quote! {}, trait_name, &glib);
@@ -724,8 +704,7 @@ impl Property {
                 quote! { <Self as #go::glib::object::ObjectExt>::property(self, #name) }
             } else {
                 let field = self.field_storage(Some(object_type), go);
-                let ty = self.inner_type(go);
-                quote! { #go::ParamStoreRead::get_value(&#field).get::<#ty>().unwrap() }
+                quote! { #go::ParamStoreRead::get(&#field) }
             };
             quote! {
                 #proto {
@@ -743,14 +722,14 @@ impl Property {
         if self.is_interface() {
             return None;
         }
-        self.set.as_ref().map(|expr| {
+        self.set.as_ref().map(|method| {
             let ty = self.inner_type(go);
-            let set = if let Some(expr) = &expr {
-                quote! { #expr(value.get::<#ty>().unwrap()); }
+            let set = if let Some(method) = &method {
+                quote! { obj.#method(value.get_owned::<#ty>().unwrap()); }
             } else if trait_name.is_some() && self.flags.contains(PropertyFlags::EXPLICIT_NOTIFY) {
                 let method_name = format_ident!("set_{}", self.name().to_snake_case());
                 let glib = quote! { #go::glib };
-                Self::method_call(&method_name, quote! { value }, trait_name.unwrap(), &glib)
+                Self::method_call(&method_name, quote! { value.get_owned().unwrap() }, trait_name.unwrap(), &glib)
             } else {
                 let field = self.field_storage(None, go);
                 quote! { #go::ParamStoreWrite::set_value(&#field, &value) }
@@ -783,7 +762,7 @@ impl Property {
                 } else {
                     let field = self.field_storage(Some(object_type), go);
                     quote! {
-                        if #go::ParamStoreWrite::set(&#field, &value) {
+                        if #go::ParamStoreWrite::set(&#field, value) {
                             <Self as #go::glib::object::ObjectExt>::notify_by_pspec(
                                 self,
                                 &#properties_path()[#index]

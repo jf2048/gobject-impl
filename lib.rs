@@ -1,6 +1,6 @@
 use std::ops::DerefMut;
 
-use glib::{translate::*, value::ValueType, ParamFlags, ParamSpec, Value};
+use glib::{translate::*, value::ValueType, ParamFlags, ParamSpec, Value, ToValue};
 
 pub use glib;
 pub use gobject_impl_macros::*;
@@ -351,10 +351,13 @@ impl ParamSpecBuildable for Option<glib::Variant> {
 }
 
 pub trait ParamStore {
-    type Type: ValueType;
+    type Type: ValueType + ToValue;
 }
 pub trait ParamStoreRead: ParamStore {
-    fn get_value(&self) -> glib::Value;
+    fn get(&self) -> Self::Type;
+    fn get_value(&self) -> glib::Value {
+        self.get().to_value()
+    }
 }
 pub trait ParamStoreWrite: ParamStore {
     fn set(&self, value: Self::Type) -> bool;
@@ -374,8 +377,8 @@ impl<T: ValueType> ParamStore for std::cell::Cell<T> {
     type Type = T;
 }
 impl<T: ValueType + Copy + ParamSpecBuildable> ParamStoreRead for std::cell::Cell<T> {
-    fn get_value(&self) -> glib::Value {
-        std::cell::Cell::get(self).to_value()
+    fn get(&self) -> T {
+        std::cell::Cell::get(self)
     }
 }
 impl<T: ValueType + ParamSpecBuildable + PartialEq + Copy> ParamStoreWrite for std::cell::Cell<T> {
@@ -394,9 +397,9 @@ impl<T: ParamSpecBuildable> ParamSpecBuildable for std::cell::RefCell<T> {
 impl<T: ValueType> ParamStore for std::cell::RefCell<T> {
     type Type = T;
 }
-impl<T: ValueType + ParamSpecBuildable> ParamStoreRead for std::cell::RefCell<T> {
-    fn get_value(&self) -> glib::Value {
-        self.borrow().to_value()
+impl<T: ValueType + ParamSpecBuildable + Clone> ParamStoreRead for std::cell::RefCell<T> {
+    fn get(&self) -> T {
+        self.borrow().clone()
     }
 }
 impl<T: ValueType + ParamSpecBuildable + PartialEq> ParamStoreWrite for std::cell::RefCell<T> {
@@ -415,9 +418,9 @@ impl<T: ParamSpecBuildable> ParamSpecBuildable for std::sync::Mutex<T> {
 impl<T: ValueType> ParamStore for std::sync::Mutex<T> {
     type Type = T;
 }
-impl<T: ValueType + ParamSpecBuildable> ParamStoreRead for std::sync::Mutex<T> {
-    fn get_value(&self) -> glib::Value {
-        self.lock().unwrap().to_value()
+impl<T: ValueType + ParamSpecBuildable + Clone> ParamStoreRead for std::sync::Mutex<T> {
+    fn get(&self) -> T {
+        self.lock().unwrap().clone()
     }
 }
 impl<T: ValueType + ParamSpecBuildable + PartialEq> ParamStoreWrite for std::sync::Mutex<T> {
@@ -437,9 +440,9 @@ impl<T: ParamSpecBuildable> ParamSpecBuildable for std::sync::RwLock<T> {
 impl<T: ValueType> ParamStore for std::sync::RwLock<T> {
     type Type = T;
 }
-impl<T: ValueType + ParamSpecBuildable> ParamStoreRead for std::sync::RwLock<T> {
-    fn get_value(&self) -> glib::Value {
-        self.read().unwrap().to_value()
+impl<T: ValueType + ParamSpecBuildable + Clone> ParamStoreRead for std::sync::RwLock<T> {
+    fn get(&self) -> T {
+        self.read().unwrap().clone()
     }
 }
 impl<T: ValueType + ParamSpecBuildable + PartialEq> ParamStoreWrite for std::sync::RwLock<T> {
