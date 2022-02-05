@@ -17,19 +17,21 @@ pub mod keywords {
     syn::custom_keyword!(no_hooks);
     syn::custom_keyword!(must_collect);
     syn::custom_keyword!(deprecated);
+    syn::custom_keyword!(accumulator_first_run);
 }
 
 bitflags::bitflags! {
     pub struct SignalFlags: u32 {
-        const RUN_FIRST    = 0b000000001;
-        const RUN_LAST     = 0b000000010;
-        const RUN_CLEANUP  = 0b000000100;
-        const NO_RECURSE   = 0b000001000;
-        const DETAILED     = 0b000010000;
-        const ACTION       = 0b000100000;
-        const NO_HOOKS     = 0b001000000;
-        const MUST_COLLECT = 0b010000000;
-        const DEPRECATED   = 0b100000000;
+        const RUN_FIRST             = 1 << 0;
+        const RUN_LAST              = 1 << 1;
+        const RUN_CLEANUP           = 1 << 2;
+        const NO_RECURSE            = 1 << 3;
+        const DETAILED              = 1 << 4;
+        const ACTION                = 1 << 5;
+        const NO_HOOKS              = 1 << 6;
+        const MUST_COLLECT          = 1 << 7;
+        const DEPRECATED            = 1 << 8;
+        const ACCUMULATOR_FIRST_RUN = 1 << 17;
     }
 }
 
@@ -132,15 +134,16 @@ impl Parse for SignalAttrs {
                     };
                 }
                 parse_flags! {
-                    run_first:    run_first    => SignalFlags::RUN_FIRST,
-                    run_last:     run_last     => SignalFlags::RUN_LAST,
-                    run_cleanup:  run_cleanup  => SignalFlags::RUN_CLEANUP,
-                    no_recurse:   no_recurse   => SignalFlags::NO_RECURSE,
-                    detailed:     detailed     => SignalFlags::DETAILED,
-                    action:       action       => SignalFlags::ACTION,
-                    no_hooks:     no_hooks     => SignalFlags::NO_HOOKS,
-                    must_collect: must_collect => SignalFlags::MUST_COLLECT,
-                    deprecated:   deprecated   => SignalFlags::DEPRECATED
+                    run_first:             run_first             => SignalFlags::RUN_FIRST,
+                    run_last:              run_last              => SignalFlags::RUN_LAST,
+                    run_cleanup:           run_cleanup           => SignalFlags::RUN_CLEANUP,
+                    no_recurse:            no_recurse            => SignalFlags::NO_RECURSE,
+                    detailed:              detailed              => SignalFlags::DETAILED,
+                    action:                action                => SignalFlags::ACTION,
+                    no_hooks:              no_hooks              => SignalFlags::NO_HOOKS,
+                    must_collect:          must_collect          => SignalFlags::MUST_COLLECT,
+                    deprecated:            deprecated            => SignalFlags::DEPRECATED,
+                    accumulator_first_run: accumulator_first_run => SignalFlags::ACCUMULATOR_FIRST_RUN
                 }
             }
             if !input.is_empty() {
