@@ -3,6 +3,8 @@ use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::Token;
 
+use super::util::*;
+
 mod keywords {
     syn::custom_keyword!(property);
 
@@ -156,12 +158,23 @@ impl Property {
         let static_type = quote! {
             <<<#ty as #go::ParamStore>::Type as #glib::value::ValueType>::Type as #glib::StaticType>::static_type(),
         };
-        let props = self.buildable_props.iter().map(|(ident, value)| quote! { .#ident(#value) });
+        let props = self
+            .buildable_props
+            .iter()
+            .map(|(ident, value)| quote! { .#ident(#value) });
         let builder = match &self.special_type {
-            PropertyType::Enum(_) => quote! { #go::ParamSpecEnumBuilder::new() },
-            PropertyType::Flags(_) => quote! { #go::ParamSpecFlagsBuilder::new() },
-            PropertyType::Boxed(_) => quote! { #go::ParamSpecBoxedBuilder::new() },
-            PropertyType::Object(_) => quote! { #go::ParamSpecObjectBuilder::new() },
+            PropertyType::Enum(_) => quote! {
+                <#go::ParamSpecEnumBuilder as ::core::default::Default>::default()
+            },
+            PropertyType::Flags(_) => quote! {
+                <#go::ParamSpecFlagsBuilder as ::core::default::Default>::default()
+            },
+            PropertyType::Boxed(_) => quote! {
+                <#go::ParamSpecBoxedBuilder as ::core::default::Default>::default()
+            },
+            PropertyType::Object(_) => quote! {
+                <#go::ParamSpecObjectBuilder as ::core::default::Default>::default()
+            },
             _ => quote! { <#ty as #go::ParamSpecBuildable>::builder() },
         };
         let type_prop = match &self.special_type {
@@ -206,7 +219,7 @@ impl Property {
                 quote! { #recv.#field }
             }
             PropertyStorage::Delegate(delegate) => quote! { #delegate },
-            _ => unreachable!(),
+            _ => unreachable!("cannot get storage for interface/virtual property"),
         }
     }
     fn method_call(
@@ -222,6 +235,14 @@ impl Property {
         } else {
             quote! { obj.#method_name(#args) }
         }
+    }
+    fn impl_trait(&self, trait_name: &TokenStream, glib: &TokenStream) -> TokenStream {
+        let imp = if self.is_interface() {
+            quote! { <Self as #glib::ObjectType>::GlibClassType }
+        } else {
+            quote! { <Self as #glib::object::ObjectSubclassIs>::Subclass }
+        };
+        quote! { <#imp as #trait_name> }
     }
     pub fn get_impl(
         &self,
@@ -311,19 +332,21 @@ impl Property {
     ) -> Option<TokenStream> {
         matches!(self.set, Some(None)).then(|| {
             let proto = self.setter_prototype(go).expect("no setter proto");
-            let body = if self.is_interface() || !self.flags.contains(PropertyFlags::EXPLICIT_NOTIFY) {
-                let name = self.name();
-                quote! {
-                    self.set_property(#name, value);
-                }
-            } else {
-                let field = self.field_storage(Some(go));
-                quote! {
-                    if #go::ParamStoreWrite::set(&#field, &value) {
-                        self.notify_by_pspec(&<<Self as #go::glib::object::ObjectSubclassIs>::Subclass as #trait_name>::properties()[#index]);
+            let body =
+                if self.is_interface() || !self.flags.contains(PropertyFlags::EXPLICIT_NOTIFY) {
+                    let name = self.name();
+                    quote! {
+                        self.set_property(#name, value);
                     }
-                }
-            };
+                } else {
+                    let field = self.field_storage(Some(go));
+                    let impl_trait = self.impl_trait(trait_name, &quote! { #go::glib });
+                    quote! {
+                        if #go::ParamStoreWrite::set(&#field, &value) {
+                            self.notify_by_pspec(&#impl_trait::properties()[#index]);
+                        }
+                    }
+                };
             quote! {
                 #proto {
                     #body
@@ -342,10 +365,9 @@ impl Property {
         glib: &TokenStream,
     ) -> TokenStream {
         let proto = self.pspec_prototype(glib);
+        let impl_trait = self.impl_trait(trait_name, glib);
         quote! {
-            #proto {
-                &<<Self as #glib::object::ObjectSubclassIs>::Subclass as #trait_name>::properties()[#index]
-            }
+            #proto { &#impl_trait::properties()[#index] }
         }
     }
     pub fn notify_prototype(&self) -> TokenStream {
@@ -359,9 +381,10 @@ impl Property {
         glib: &TokenStream,
     ) -> TokenStream {
         let proto = self.notify_prototype();
+        let impl_trait = self.impl_trait(trait_name, glib);
         quote! {
             #proto {
-                self.notify_by_pspec(&<<Self as #glib::object::ObjectSubclassIs>::Subclass as #trait_name>::properties()[#index]);
+                self.notify_by_pspec(&#impl_trait::properties()[#index]);
             }
         }
     }
@@ -413,7 +436,7 @@ impl Property {
         let mut prop = if let Some(pos) = attr_pos {
             let attr = field.attrs.remove(pos);
             syn::parse::Parser::parse2(
-                super::constrain(|item| Self::parse_attr(item, &field, pod, iface)),
+                constrain(|item| Self::parse_attr(item, &field, pod, iface)),
                 attr.tokens,
             )?
         } else {
@@ -526,35 +549,57 @@ impl Property {
             } else if lookahead.peek(keywords::minimum) {
                 let kw = input.parse::<keywords::minimum>()?;
                 let ident = format_ident!("minimum");
-                if prop.buildable_props.iter().find(|(n, _)| *n == ident).is_some() {
+                if prop
+                    .buildable_props
+                    .iter()
+                    .any(|(n, _)| *n == ident)
+                {
                     return Err(syn::Error::new_spanned(kw, "Duplicate `minimum` attribute"));
                 }
                 input.parse::<Token![=]>()?;
-                prop.buildable_props.push((ident, input.parse::<syn::Lit>()?));
+                prop.buildable_props
+                    .push((ident, input.parse::<syn::Lit>()?));
             } else if lookahead.peek(keywords::maximum) {
                 let kw = input.parse::<keywords::maximum>()?;
                 let ident = format_ident!("maximum");
-                if prop.buildable_props.iter().find(|(n, _)| *n == ident).is_some() {
+                if prop
+                    .buildable_props
+                    .iter()
+                    .any(|(n, _)| *n == ident)
+                {
                     return Err(syn::Error::new_spanned(kw, "Duplicate `maximum` attribute"));
                 }
                 input.parse::<Token![=]>()?;
-                prop.buildable_props.push((ident, input.parse::<syn::Lit>()?));
+                prop.buildable_props
+                    .push((ident, input.parse::<syn::Lit>()?));
             } else if lookahead.peek(keywords::default) {
                 let kw = input.parse::<keywords::default>()?;
                 let ident = format_ident!("default");
-                if prop.buildable_props.iter().find(|(n, _)| *n == ident).is_some() {
+                if prop
+                    .buildable_props
+                    .iter()
+                    .any(|(n, _)| *n == ident)
+                {
                     return Err(syn::Error::new_spanned(kw, "Duplicate `default` attribute"));
                 }
                 input.parse::<Token![=]>()?;
-                prop.buildable_props.push((ident, input.parse::<syn::Lit>()?));
+                prop.buildable_props
+                    .push((ident, input.parse::<syn::Lit>()?));
             } else if lookahead.peek(keywords::custom) {
                 input.parse::<keywords::custom>()?;
                 let custom;
                 syn::parenthesized!(custom in input);
                 while custom.is_empty() {
                     let ident = custom.parse()?;
-                    if prop.buildable_props.iter().find(|(n, _)| *n == ident).is_some() {
-                        return Err(syn::Error::new_spanned(&ident, format!("Duplicate `{}` attribute", ident)));
+                    if prop
+                        .buildable_props
+                        .iter()
+                        .any(|(n, _)| *n == ident)
+                    {
+                        return Err(syn::Error::new_spanned(
+                            &ident,
+                            format!("Duplicate `{}` attribute", ident),
+                        ));
                     }
                     custom.parse::<Token![=]>()?;
                     let value = custom.parse()?;
@@ -697,7 +742,7 @@ impl Property {
 
         // validation
         let name = prop.name();
-        if !super::is_valid_name(&name) {
+        if !is_valid_name(&name) {
             return Err(syn::Error::new(
                 prop.name_span(),
                 format!("Invalid property name '{}'. Property names must start with an ASCII letter and only contain ASCII letters, numbers, '-' or '_'", name),

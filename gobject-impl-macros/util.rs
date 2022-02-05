@@ -1,7 +1,7 @@
 use heck::ToKebabCase;
 use proc_macro2::TokenStream;
 use quote::{quote, ToTokens};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use syn::{parse::Parse, Token};
 
 use super::property::*;
@@ -63,8 +63,8 @@ pub struct Args {
     pub pod: bool,
 }
 
-impl Parse for Args {
-    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+impl Args {
+    pub fn parse(input: syn::parse::ParseStream, interface: bool) -> syn::Result<Self> {
         let mut args = Self {
             type_: None,
             impl_trait: None,
@@ -72,6 +72,7 @@ impl Parse for Args {
             private_trait: None,
             pod: false,
         };
+
         #[inline]
         fn parse_trait<T: Parse + syn::token::CustomToken + ToTokens>(
             input: &syn::parse::ParseStream,
@@ -86,6 +87,7 @@ impl Parse for Args {
             storage.replace(input.parse()?);
             Ok(())
         }
+
         while !input.is_empty() {
             let lookahead = input.lookahead1();
             if lookahead.peek(Token![type]) {
@@ -109,9 +111,9 @@ impl Parse for Args {
                 } else {
                     args.impl_trait.replace(None);
                 }
-            } else if lookahead.peek(keywords::public_trait) {
+            } else if !interface && lookahead.peek(keywords::public_trait) {
                 parse_trait::<keywords::public_trait>(&input, &mut args.public_trait)?;
-            } else if lookahead.peek(keywords::private_trait) {
+            } else if !interface && lookahead.peek(keywords::private_trait) {
                 parse_trait::<keywords::private_trait>(&input, &mut args.private_trait)?;
             } else if lookahead.peek(keywords::pod) {
                 let kw = input.parse::<keywords::pod>()?;
@@ -126,20 +128,6 @@ impl Parse for Args {
                 input.parse::<Token![,]>()?;
             }
         }
-        if args.type_.is_some() {
-            if let Some(public_trait) = &args.public_trait {
-                return Err(syn::Error::new_spanned(
-                    public_trait,
-                    "`public_trait` not allowed with `type`",
-                ));
-            }
-            if let Some(private_trait) = &args.private_trait {
-                return Err(syn::Error::new_spanned(
-                    private_trait,
-                    "`private_trait` not allowed with `type`",
-                ));
-            }
-        }
         Ok(args)
     }
 }
@@ -149,7 +137,6 @@ pub enum DefinitionType {
         ident: syn::Ident,
     },
     Interface {
-        defaultness: Option<Token![default]>,
         unsafety: Option<Token![unsafe]>,
         trait_: Option<(Option<Token![!]>, syn::Path)>,
         self_ty: Box<syn::Type>,
@@ -163,9 +150,7 @@ pub struct ObjectDefinition {
     pub generics: syn::Generics,
     pub properties: Vec<Property>,
     pub signals: Vec<Signal>,
-    pub methods: Vec<syn::ImplItemMethod>,
-    pub types: Vec<syn::ImplItemType>,
-    pub consts: Vec<syn::ImplItemConst>,
+    pub items: Vec<syn::ImplItem>,
 }
 
 fn parse_args(content: &syn::parse::ParseBuffer) -> syn::Result<Vec<syn::FnArg>> {
@@ -182,6 +167,42 @@ fn parse_args(content: &syn::parse::ParseBuffer) -> syn::Result<Vec<syn::FnArg>>
     Ok(inputs)
 }
 
+fn fixup_item(
+    item: &mut syn::ImplItem,
+    mut attrs: Vec<syn::Attribute>,
+    vis: syn::Visibility,
+) -> syn::Result<()> {
+    match item {
+        syn::ImplItem::Const(i) => {
+            attrs.append(&mut i.attrs);
+            i.attrs = attrs;
+            i.vis = vis;
+        }
+        syn::ImplItem::Method(i) => {
+            attrs.append(&mut i.attrs);
+            i.attrs = attrs;
+            i.vis = vis;
+        }
+        syn::ImplItem::Type(i) => {
+            attrs.append(&mut i.attrs);
+            i.attrs = attrs;
+            i.vis = vis;
+        }
+        syn::ImplItem::Macro(i) => {
+            attrs.append(&mut i.attrs);
+            i.attrs = attrs;
+            if !matches!(vis, syn::Visibility::Inherited) {
+                return Err(syn::Error::new_spanned(vis, "macro cannot have visibility"));
+            }
+        }
+        syn::ImplItem::Verbatim(tokens) => {
+            *tokens = quote! { #(#attrs)* #vis #tokens };
+        }
+        _ => (),
+    };
+    Ok(())
+}
+
 impl ObjectDefinition {
     pub fn header_tokens(&self) -> TokenStream {
         let Self {
@@ -196,7 +217,6 @@ impl ObjectDefinition {
                 #vis struct #ident #generics
             },
             DefinitionType::Interface {
-                defaultness,
                 unsafety,
                 trait_,
                 self_ty,
@@ -205,7 +225,7 @@ impl ObjectDefinition {
                 let trait_ = trait_.as_ref().map(|(bang, path)| quote! { #bang #path });
                 quote! {
                     #(#attrs)*
-                    #vis #defaultness #unsafety impl #impl_generics #trait_ for #self_ty #ty_generics #where_clause
+                    #vis #unsafety impl #impl_generics #trait_ for #self_ty #ty_generics #where_clause
                 }
             }
         }
@@ -215,7 +235,6 @@ impl ObjectDefinition {
         let vis = input.parse::<syn::Visibility>()?;
 
         let (definition, generics) = if iface {
-            let defaultness = input.parse()?;
             let unsafety = input.parse()?;
             input.parse::<Token![impl]>()?;
 
@@ -257,7 +276,6 @@ impl ObjectDefinition {
 
             (
                 DefinitionType::Interface {
-                    defaultness,
                     unsafety,
                     trait_,
                     self_ty,
@@ -278,22 +296,31 @@ impl ObjectDefinition {
         syn::braced!(content in input);
         attrs.append(&mut input.call(syn::Attribute::parse_inner)?);
 
-        let mut properties = HashMap::<String, Property>::new();
+        let mut property_names = HashSet::<String>::new();
+        let mut properties = Vec::<Property>::new();
         let mut signal_names = HashSet::<String>::new();
-        let mut signals = HashMap::<syn::Ident, Signal>::new();
-        let mut methods = vec![];
-        let mut types = vec![];
-        let mut consts = vec![];
+        let mut signals = Vec::<Signal>::new();
+        let mut items = vec![];
 
         loop {
             if content.is_empty() {
                 break;
             }
-            let attrs = content.call(syn::Attribute::parse_outer)?;
+            let mut attrs = content.call(syn::Attribute::parse_outer)?;
             let vis = content.parse()?;
-            if content.peek(signal::keywords::signal) && content.peek2(syn::Ident) {
+            let lookahead = content.lookahead1();
+            if lookahead.peek(signal::keywords::signal) && content.peek2(syn::Ident) {
                 content.parse::<signal::keywords::signal>()?;
                 let ident: syn::Ident = content.call(syn::ext::IdentExt::parse_any)?;
+                let inputs = parse_args(&content)?;
+                let output = content.parse()?;
+                let mut block = None;
+                if !content.peek(Token![;]) {
+                    block = Some(Box::new(content.parse::<syn::Block>()?));
+                } else {
+                    content.parse::<Token![;]>()?;
+                }
+
                 let mut signal_attrs = None;
                 for attr in attrs {
                     if signal_attrs.is_some() {
@@ -302,20 +329,18 @@ impl ObjectDefinition {
                             "Only one attribute allowed on signal",
                         ));
                     }
+                    if !attr.path.is_ident("signal") {
+                        return Err(syn::Error::new_spanned(
+                            attr,
+                            "Only `signal` attribute allowed here",
+                        ));
+                    }
                     signal_attrs = Some(syn::parse2::<SignalAttrs>(attr.tokens)?);
                 }
                 let name = signal_attrs
                     .as_ref()
                     .and_then(|a| a.name.to_owned())
                     .unwrap_or_else(|| ident.to_string().to_kebab_case());
-                let inputs = parse_args(&content)?;
-                let output = content.parse()?;
-                let mut block = None;
-                if !content.peek(Token![;]) {
-                    block = Some(Box::new(input.parse::<syn::Block>()?));
-                } else {
-                    content.parse::<Token![;]>()?;
-                }
 
                 if signal_names.contains(&name) {
                     return Err(syn::Error::new_spanned(
@@ -324,12 +349,24 @@ impl ObjectDefinition {
                     ));
                 }
                 signal_names.insert(name.clone());
-                let signal = signals.entry(ident.clone()).or_default();
+                let signal = if let Some(i) = signals.iter().position(|s| s.ident == ident) {
+                    &mut signals[i]
+                } else {
+                    signals.push(Signal::new(ident.clone()));
+                    signals.last_mut().unwrap()
+                };
+                if signal.inputs.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        &ident,
+                        format!("Duplicate definition for signal `{}`", ident),
+                    ));
+                }
                 if let Some(attrs) = &signal_attrs {
                     signal.flags = attrs.flags;
                     signal.emit_public = attrs.emit_public;
                 }
                 signal.name = name;
+                signal.interface = iface;
                 signal.public = match vis {
                     syn::Visibility::Inherited => false,
                     syn::Visibility::Public(_) => true,
@@ -357,10 +394,14 @@ impl ObjectDefinition {
                         ));
                     }
                 }
-            } else if content.peek(signal::keywords::accumulator)
-                && content.peek2(syn::Ident)
-            {
+            } else if lookahead.peek(signal::keywords::accumulator) && content.peek2(syn::Ident) {
                 let kw = content.parse::<signal::keywords::accumulator>()?;
+                if let Some(attr) = attrs.first() {
+                    return Err(syn::Error::new_spanned(
+                        attr,
+                        "accumulator cannot have attributes",
+                    ));
+                }
                 if !matches!(vis, syn::Visibility::Inherited) {
                     return Err(syn::Error::new_spanned(
                         vis,
@@ -376,9 +417,14 @@ impl ObjectDefinition {
                         "accumulator must have return type",
                     ));
                 }
-                let block = Box::new(input.parse::<syn::Block>()?);
+                let block = Box::new(content.parse::<syn::Block>()?);
 
-                let signal = signals.entry(ident.clone()).or_default();
+                let signal = if let Some(i) = signals.iter().position(|s| s.ident == ident) {
+                    &mut signals[i]
+                } else {
+                    signals.push(Signal::new(ident.clone()));
+                    signals.last_mut().unwrap()
+                };
                 if signal.accumulator.is_some() {
                     return Err(syn::Error::new_spanned(
                         &ident,
@@ -389,52 +435,46 @@ impl ObjectDefinition {
                     ));
                 }
                 signal.accumulator = Some((kw, inputs, block));
-            } else if content.peek(Token![fn]) {
-                let mut m = content.parse::<syn::ImplItemMethod>()?;
-                m.attrs = attrs;
-                m.vis = vis;
-                methods.push(m);
-            } else if content.peek(Token![type]) {
-                let mut t = content.parse::<syn::ImplItemType>()?;
-                t.attrs = attrs;
-                t.vis = vis;
-                types.push(t);
-            } else if content.peek(Token![const]) {
-                let mut c = content.parse::<syn::ImplItemConst>()?;
-                c.attrs = attrs;
-                c.vis = vis;
-                consts.push(c);
-            } else {
-                let ident: syn::Ident = if content.peek(Token![_]) {
-                    content.call(syn::ext::IdentExt::parse_any)
+            } else if lookahead.peek(Token![fn])
+                || lookahead.peek(Token![type])
+                || lookahead.peek(Token![const])
+                || (matches!(vis, syn::Visibility::Inherited)
+                    && (lookahead.peek(Token![self])
+                        || lookahead.peek(Token![super])
+                        || lookahead.peek(Token![crate])
+                        || lookahead.peek(Token![::])))
+            {
+                let mut item = content.parse::<syn::ImplItem>()?;
+                fixup_item(&mut item, attrs, vis)?;
+                items.push(item);
+            } else if lookahead.peek(Token![_]) || lookahead.peek(syn::Ident) {
+                if content.peek2(Token![:]) {
+                    let mut field = syn::Field::parse_named(&content)?;
+                    attrs.append(&mut field.attrs);
+                    field.attrs = attrs;
+                    let prop = Property::parse(field, pod, iface)?;
+                    let name = prop.name();
+                    if property_names.contains(&name) {
+                        return Err(syn::Error::new(
+                            prop.name_span(),
+                            format!("Duplicate definition for property `{}`", name),
+                        ));
+                    }
+                    property_names.insert(name);
+                    properties.push(prop);
+                    if content.is_empty() {
+                        break;
+                    }
+                    content.parse::<Token![,]>()?;
                 } else {
-                    content.parse()
-                }?;
-                let field = syn::Field {
-                    attrs,
-                    vis,
-                    ident: Some(ident.clone()),
-                    colon_token: Some(content.parse()?),
-                    ty: content.parse()?,
-                };
-                let prop = Property::parse(field, pod, iface)?;
-                let name = prop.name();
-                if properties.contains_key(&name) {
-                    return Err(syn::Error::new_spanned(
-                        &ident,
-                        format!("Duplicate definition for property `{}`", name),
-                    ));
+                    let mut item = content.parse::<syn::ImplItem>()?;
+                    fixup_item(&mut item, attrs, vis)?;
+                    items.push(item);
                 }
-                properties.insert(name, prop);
-                if content.is_empty() {
-                    break;
-                }
-                content.parse::<Token![,]>()?;
+            } else {
+                return Err(lookahead.error());
             }
         }
-
-        let properties = properties.into_values().collect();
-        let signals = signals.into_values().collect();
 
         Ok(ObjectDefinition {
             attrs,
@@ -443,9 +483,7 @@ impl ObjectDefinition {
             generics,
             properties,
             signals,
-            methods,
-            types,
-            consts,
+            items,
         })
     }
 }
@@ -453,6 +491,15 @@ impl ObjectDefinition {
 pub enum OutputMethods {
     Type(syn::Type),
     Trait(TokenStream, syn::Generics),
+}
+
+impl OutputMethods {
+    pub fn type_(&self) -> Option<&syn::Type> {
+        match self {
+            OutputMethods::Type(t) => Some(t),
+            _ => None,
+        }
+    }
 }
 
 pub struct Output {
@@ -485,7 +532,9 @@ impl Output {
         let signal_defs = if signals.is_empty() {
             quote! { &[] }
         } else {
-            let signals = signals.iter().map(|signal| signal.create(&glib));
+            let signals = signals
+                .iter()
+                .map(|signal| signal.create(method_type.type_(), &glib));
             quote! {
                 static SIGNALS: #glib::once_cell::sync::Lazy<::std::vec::Vec<#glib::subclass::Signal>> = #glib::once_cell::sync::Lazy::new(|| {
                     vec![

@@ -1,22 +1,40 @@
 use proc_macro2::TokenStream;
+use proc_macro_error::abort;
 use quote::{format_ident, quote};
 
 use super::util::*;
 
-pub fn object_impl(args: Args, item: proc_macro::TokenStream) -> TokenStream {
+pub struct ObjectImplArgs(Args);
+
+impl syn::parse::Parse for ObjectImplArgs {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        Ok(Self(Args::parse(input, false)?))
+    }
+}
+
+pub fn object_impl(args: ObjectImplArgs, item: proc_macro::TokenStream) -> TokenStream {
     let Args {
         type_,
         impl_trait,
         public_trait,
         private_trait,
         pod,
-    } = args;
+    } = args.0;
+
+    if type_.is_some() {
+        if let Some(public_trait) = &public_trait {
+            abort!(public_trait, "`public_trait` not allowed with `type`",);
+        }
+        if let Some(private_trait) = &private_trait {
+            abort!(private_trait, "`private_trait` not allowed with `type`",);
+        }
+    }
 
     let definition = syn::parse::Parser::parse(
-        super::constrain(|item| ObjectDefinition::parse(item, pod, false)),
+        constrain(|item| ObjectDefinition::parse(item, pod, false)),
         item,
     )
-    .unwrap_or_else(|e| proc_macro_error::abort!(e));
+    .unwrap_or_else(|e| abort!(e));
     let header = definition.header_tokens();
 
     let ObjectDefinition {
@@ -24,9 +42,7 @@ pub fn object_impl(args: Args, item: proc_macro::TokenStream) -> TokenStream {
         generics,
         properties,
         signals,
-        methods,
-        types,
-        consts,
+        items,
         ..
     } = definition;
 
@@ -35,7 +51,7 @@ pub fn object_impl(args: Args, item: proc_macro::TokenStream) -> TokenStream {
         _ => unreachable!(),
     };
 
-    let go = super::go_crate_ident();
+    let go = go_crate_ident();
     let glib = quote! { #go::glib };
 
     let impl_trait_name =
@@ -137,9 +153,7 @@ pub fn object_impl(args: Args, item: proc_macro::TokenStream) -> TokenStream {
                     )
                 }
             }
-            #(#methods)*
-            #(#types)*
-            #(#consts)*
+            #(#items)*
         }
         impl #impl_generics #ident #ty_generics #where_clause {
             #(#private_impl_methods)*

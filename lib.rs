@@ -205,13 +205,15 @@ pub struct ParamSpecEnumBuilder {
     type_: glib::Type,
     default: i32,
 }
-impl ParamSpecEnumBuilder {
-    pub fn new() -> Self {
+impl Default for ParamSpecEnumBuilder {
+    fn default() -> Self {
         Self {
             type_: glib::Type::UNIT,
             default: 0,
         }
     }
+}
+impl ParamSpecEnumBuilder {
     pub fn type_<T: glib::StaticType>(mut self) -> Self {
         self.type_ = T::static_type();
         self
@@ -229,13 +231,15 @@ pub struct ParamSpecFlagsBuilder {
     type_: glib::Type,
     default: u32,
 }
-impl ParamSpecFlagsBuilder {
-    pub fn new() -> Self {
+impl Default for ParamSpecFlagsBuilder {
+    fn default() -> Self {
         Self {
             type_: glib::Type::UNIT,
             default: 0,
         }
     }
+}
+impl ParamSpecFlagsBuilder {
     pub fn type_<T: glib::StaticType>(mut self) -> Self {
         self.type_ = T::static_type();
         self
@@ -252,12 +256,14 @@ impl ParamSpecFlagsBuilder {
 pub struct ParamSpecBoxedBuilder {
     type_: glib::Type,
 }
-impl ParamSpecBoxedBuilder {
-    pub fn new() -> Self {
+impl Default for ParamSpecBoxedBuilder {
+    fn default() -> Self {
         Self {
             type_: glib::Type::UNIT,
         }
     }
+}
+impl ParamSpecBoxedBuilder {
     pub fn type_<T: glib::StaticType>(mut self) -> Self {
         self.type_ = T::static_type();
         self
@@ -269,6 +275,13 @@ impl ParamSpecBoxedBuilder {
 
 pub struct ParamSpecObjectBuilder {
     type_: glib::Type,
+}
+impl Default for ParamSpecObjectBuilder {
+    fn default() -> Self {
+        Self {
+            type_: glib::Type::UNIT,
+        }
+    }
 }
 impl ParamSpecObjectBuilder {
     pub fn new() -> Self {

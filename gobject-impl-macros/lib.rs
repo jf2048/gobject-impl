@@ -1,3 +1,5 @@
+#![feature(proc_macro_span)]
+
 use proc_macro::TokenStream;
 use proc_macro_error::proc_macro_error;
 
@@ -6,18 +8,17 @@ mod object_impl;
 mod property;
 mod signal;
 mod util;
-use util::*;
 
 #[proc_macro_attribute]
 #[proc_macro_error]
 pub fn object_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = syn::parse_macro_input!(attr as Args);
+    let args = syn::parse_macro_input!(attr as object_impl::ObjectImplArgs);
     object_impl::object_impl(args, item).into()
 }
 
 #[proc_macro_attribute]
 #[proc_macro_error]
 pub fn interface_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = syn::parse_macro_input!(attr as Args);
+    let args = syn::parse_macro_input!(attr as interface_impl::InterfaceImplArgs);
     interface_impl::interface_impl(args, item).into()
 }

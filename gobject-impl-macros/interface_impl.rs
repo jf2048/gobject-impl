@@ -4,24 +4,31 @@ use quote::quote;
 
 use super::util::*;
 
-pub fn interface_impl(args: Args, item: proc_macro::TokenStream) -> TokenStream {
+pub struct InterfaceImplArgs(Args);
+
+impl syn::parse::Parse for InterfaceImplArgs {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        Ok(Self(Args::parse(input, true)?))
+    }
+}
+
+pub fn interface_impl(args: InterfaceImplArgs, item: proc_macro::TokenStream) -> TokenStream {
     let Args {
         type_,
         impl_trait,
-        public_trait,
-        private_trait,
         pod,
-    } = args;
+        ..
+    } = args.0;
 
+    let type_ = type_.unwrap_or_else(|| {
+        abort_call_site!("`type` attribute required for `interface_impl`");
+    });
     if matches!(impl_trait, Some(None)) {
         abort_call_site!("`impl_trait` attribute must specify a type");
     }
-    if type_.is_none() && (public_trait.is_none() || private_trait.is_none()) {
-        abort_call_site!("must provide either a `type` attribute, or `public_trait` and `private_trait` attributes");
-    }
 
     let definition = syn::parse::Parser::parse(
-        super::constrain(|item| ObjectDefinition::parse(item, pod, true)),
+        constrain(|item| ObjectDefinition::parse(item, pod, true)),
         item,
     )
     .unwrap_or_else(|e| abort!(e));
@@ -34,9 +41,7 @@ pub fn interface_impl(args: Args, item: proc_macro::TokenStream) -> TokenStream 
         generics,
         properties,
         signals,
-        methods,
-        types,
-        consts,
+        items,
     } = definition;
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
@@ -45,7 +50,7 @@ pub fn interface_impl(args: Args, item: proc_macro::TokenStream) -> TokenStream 
         _ => unreachable!(),
     };
 
-    let go = super::go_crate_ident();
+    let go = go_crate_ident();
     let glib = quote! { #go::glib };
 
     let impl_trait_name = impl_trait.flatten();
@@ -71,13 +76,6 @@ pub fn interface_impl(args: Args, item: proc_macro::TokenStream) -> TokenStream 
         quote! { #glib::subclass::prelude::ObjectInterface }
     };
 
-    let method_type = type_.map(OutputMethods::Type).unwrap_or_else(|| {
-        OutputMethods::Trait(
-            quote! { <#self_ty as #glib::subclass::prelude::ObjectInterface>::Type },
-            generics.clone(),
-        )
-    });
-
     let Output {
         private_impl_methods,
         define_methods,
@@ -87,10 +85,10 @@ pub fn interface_impl(args: Args, item: proc_macro::TokenStream) -> TokenStream 
     } = Output::new(
         &signals,
         &properties,
-        method_type,
+        OutputMethods::Type(type_),
         &trait_name,
-        public_trait.as_ref(),
-        private_trait.as_ref(),
+        None,
+        None,
         &go,
     );
 
@@ -103,9 +101,7 @@ pub fn interface_impl(args: Args, item: proc_macro::TokenStream) -> TokenStream 
             fn signals() -> &'static [#glib::subclass::Signal] {
                 #signal_defs
             }
-            #(#methods)*
-            #(#types)*
-            #(#consts)*
+            #(#items)*
         }
         impl #impl_generics #self_ty #ty_generics #where_clause {
             #(#private_impl_methods)*
