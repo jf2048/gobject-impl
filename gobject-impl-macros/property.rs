@@ -1,6 +1,7 @@
 use heck::{ToKebabCase, ToSnakeCase};
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
+use std::collections::HashSet;
 use syn::Token;
 
 use super::util::*;
@@ -11,6 +12,8 @@ mod keywords {
     syn::custom_keyword!(skip);
     syn::custom_keyword!(get);
     syn::custom_keyword!(set);
+    syn::custom_keyword!(notify);
+    syn::custom_keyword!(connect_notify);
 
     syn::custom_keyword!(name);
     syn::custom_keyword!(nick);
@@ -25,7 +28,6 @@ mod keywords {
     syn::custom_keyword!(object);
     syn::custom_keyword!(variant);
     syn::custom_keyword!(storage);
-    syn::custom_keyword!(notify);
 
     syn::custom_keyword!(construct);
     syn::custom_keyword!(construct_only);
@@ -114,16 +116,15 @@ pub enum PropertyName {
 }
 
 pub struct Property {
-    pub field: Option<syn::Field>,
-    pub public: bool,
     pub skip: bool,
     pub ty: syn::Type,
     pub special_type: PropertyType,
-    pub notify_public: bool,
     pub storage: PropertyStorage,
     pub override_: Option<syn::Type>,
     pub get: Option<Option<syn::Path>>,
     pub set: Option<Option<syn::Path>>,
+    pub notify: bool,
+    pub connect_notify: bool,
     pub name: PropertyName,
     pub nick: Option<syn::LitStr>,
     pub blurb: Option<syn::LitStr>,
@@ -133,278 +134,51 @@ pub struct Property {
 }
 
 impl Property {
-    pub fn create(&self, go: &syn::Ident) -> TokenStream {
-        let glib = quote! { #go::glib };
-        let name = self.name();
-        if let Some(iface) = &self.override_ {
-            return quote! {
-                #glib::ParamSpecOverride::for_interface::<#iface>(#name)
-            };
-        }
-        let nick = self
-            .nick
-            .as_ref()
-            .map(|s| s.value())
-            .unwrap_or_else(|| name.clone());
-        let blurb = self
-            .blurb
-            .as_ref()
-            .map(|s| s.value())
-            .unwrap_or_else(|| name.clone());
-        let flags = self
-            .flags
-            .tokens(&glib, self.get.is_some(), self.set.is_some());
-        let ty = &self.ty;
-        let static_type = quote! {
-            <<<#ty as #go::ParamStore>::Type as #glib::value::ValueType>::Type as #glib::StaticType>::static_type(),
+    pub fn from_struct(item: &mut syn::ItemStruct, pod: bool, iface: bool) -> syn::Result<Vec<Self>> {
+        let mut named = match &mut item.fields {
+            syn::Fields::Named(fields) => fields,
+            f => return Err(syn::Error::new_spanned(
+                f,
+                "struct must have named fields",
+            ))
         };
-        let props = self
-            .buildable_props
-            .iter()
-            .map(|(ident, value)| quote! { .#ident(#value) });
-        let builder = match &self.special_type {
-            PropertyType::Enum(_) => quote! {
-                <#go::ParamSpecEnumBuilder as ::core::default::Default>::default()
-            },
-            PropertyType::Flags(_) => quote! {
-                <#go::ParamSpecFlagsBuilder as ::core::default::Default>::default()
-            },
-            PropertyType::Boxed(_) => quote! {
-                <#go::ParamSpecBoxedBuilder as ::core::default::Default>::default()
-            },
-            PropertyType::Object(_) => quote! {
-                <#go::ParamSpecObjectBuilder as ::core::default::Default>::default()
-            },
-            _ => quote! { <#ty as #go::ParamSpecBuildable>::builder() },
-        };
-        let type_prop = match &self.special_type {
-            PropertyType::Unspecified => None,
-            PropertyType::Variant(_, element) => Some(quote! { .type_(#element) }),
-            _ => Some(quote! { .type_(#static_type) }),
-        };
-        quote! {
-            #builder
-            #type_prop
-            #(#props)*
-            .build(#name, #nick, #blurb, #flags)
-        }
-    }
-    pub fn name(&self) -> String {
-        match &self.name {
-            PropertyName::Field(name) => name.to_string().to_kebab_case(),
-            PropertyName::Custom(name) => name.value(),
-        }
-    }
-    pub fn name_span(&self) -> Span {
-        match &self.name {
-            PropertyName::Field(name) => name.span(),
-            PropertyName::Custom(name) => name.span(),
-        }
-    }
-    fn inner_type(&self, go: &syn::Ident) -> TokenStream {
-        let ty = &self.ty;
-        quote! { <#ty as #go::ParamStore>::Type }
-    }
-    fn is_interface(&self) -> bool {
-        matches!(self.storage, PropertyStorage::Interface)
-    }
-    fn field_storage(&self, go: Option<&syn::Ident>) -> TokenStream {
-        match &self.storage {
-            PropertyStorage::Field(field) => {
-                let recv = if let Some(go) = go {
-                    quote! { #go::glib::subclass::prelude::ObjectSubclassIsExt::imp(self) }
-                } else {
-                    quote! { self }
-                };
-                quote! { #recv.#field }
+
+        let mut fields = std::mem::take(&mut named.named).into_iter().collect::<Vec<_>>();
+
+        let mut names = HashSet::new();
+        let mut properties = vec![];
+        let mut field_index = 0;
+        loop {
+            if field_index >= fields.len() {
+                break;
             }
-            PropertyStorage::Delegate(delegate) => quote! { #delegate },
-            _ => unreachable!("cannot get storage for interface/virtual property"),
-        }
-    }
-    fn method_call(
-        method_name: &syn::Ident,
-        args: TokenStream,
-        trait_name: Option<&syn::Ident>,
-        glib: &TokenStream,
-    ) -> TokenStream {
-        if let Some(trait_name) = trait_name {
-            quote! {
-                <<Self as #glib::subclass::types::ObjectSubclass>::Type as #trait_name>::#method_name(obj, #args)
-            }
-        } else {
-            quote! { obj.#method_name(#args) }
-        }
-    }
-    fn impl_trait(&self, trait_name: &TokenStream, glib: &TokenStream) -> TokenStream {
-        let imp = if self.is_interface() {
-            quote! { <Self as #glib::ObjectType>::GlibClassType }
-        } else {
-            quote! { <Self as #glib::object::ObjectSubclassIs>::Subclass }
-        };
-        quote! { <#imp as #trait_name> }
-    }
-    pub fn get_impl(
-        &self,
-        index: usize,
-        trait_name: Option<&syn::Ident>,
-        glib: &TokenStream,
-    ) -> Option<TokenStream> {
-        if self.is_interface() {
-            return None;
-        }
-        self.get.as_ref().map(|expr| {
-            let expr = expr
-                .as_ref()
-                .map(|expr| quote! { #expr() })
-                .unwrap_or_else(|| {
-                    let method_name = format_ident!("{}", self.name().to_snake_case());
-                    Self::method_call(&method_name, quote! {}, trait_name, glib)
-                });
-            quote! {
-                #index => {
-                    #glib::ToValue::to_value(&#expr)
-                }
-            }
-        })
-    }
-    pub fn getter_prototype(&self, go: &syn::Ident) -> Option<TokenStream> {
-        matches!(self.get, Some(None)).then(|| {
-            let method_name = format_ident!("{}", self.name().to_snake_case());
-            let ty = self.inner_type(go);
-            quote! { fn #method_name(&self) -> #ty }
-        })
-    }
-    pub fn getter_definition(&self, go: &syn::Ident) -> Option<TokenStream> {
-        matches!(self.get, Some(None)).then(|| {
-            let proto = self.getter_prototype(go).expect("no proto for getter");
-            let body = if self.is_interface() {
-                let name = self.name();
-                quote! { self.property(#name) }
-            } else {
-                let field = self.field_storage(Some(go));
-                let ty = self.inner_type(go);
-                quote! { #go::ParamStoreRead::get_value(&#field).get::<#ty>().unwrap() }
-            };
-            quote! {
-                #proto {
-                    #body
-                }
-            }
-        })
-    }
-    pub fn set_impl(
-        &self,
-        index: usize,
-        trait_name: Option<&syn::Ident>,
-        go: &syn::Ident,
-    ) -> Option<TokenStream> {
-        if self.is_interface() {
-            return None;
-        }
-        self.set.as_ref().map(|expr| {
-            let ty = self.inner_type(go);
-            let set = if let Some(expr) = &expr {
-                quote! { #expr(value.get::<#ty>().unwrap()); }
-            } else if self.flags.contains(PropertyFlags::EXPLICIT_NOTIFY) {
-                let method_name = format_ident!("set_{}", self.name().to_snake_case());
-                let glib = quote! { #go::glib };
-                Self::method_call(&method_name, quote! { value }, trait_name, &glib)
-            } else {
-                let field = self.field_storage(None);
-                quote! { #go::ParamStoreWrite::set_value(&#field, &value) }
-            };
-            quote! { #index => { #set; } }
-        })
-    }
-    pub fn setter_prototype(&self, go: &syn::Ident) -> Option<TokenStream> {
-        matches!(self.set, Some(None)).then(|| {
-            let method_name = format_ident!("set_{}", self.name().to_snake_case());
-            let ty = self.inner_type(go);
-            quote! { fn #method_name(&self, value: #ty) }
-        })
-    }
-    pub fn setter_definition(
-        &self,
-        index: usize,
-        trait_name: &TokenStream,
-        go: &syn::Ident,
-    ) -> Option<TokenStream> {
-        matches!(self.set, Some(None)).then(|| {
-            let proto = self.setter_prototype(go).expect("no setter proto");
-            let body =
-                if self.is_interface() || !self.flags.contains(PropertyFlags::EXPLICIT_NOTIFY) {
-                    let name = self.name();
-                    quote! {
-                        self.set_property(#name, value);
+            let mut remove = false;
+            {
+                let field = fields[field_index].clone();
+                let prop = Self::parse(field, pod, iface)?;
+                if !prop.skip {
+                    if !matches!(prop.storage, PropertyStorage::Field(_)) {
+                        remove = true;
                     }
-                } else {
-                    let field = self.field_storage(Some(go));
-                    let impl_trait = self.impl_trait(trait_name, &quote! { #go::glib });
-                    quote! {
-                        if #go::ParamStoreWrite::set(&#field, &value) {
-                            self.notify_by_pspec(&#impl_trait::properties()[#index]);
-                        }
+                    let name = prop.name();
+                    if names.contains(&name) {
+                        return Err(syn::Error::new(
+                            prop.name_span(),
+                            format!("Duplicate definition for property `{}`", name),
+                        ));
                     }
-                };
-            quote! {
-                #proto {
-                    #body
+                    names.insert(name);
+                    properties.push(prop);
                 }
             }
-        })
-    }
-    pub fn pspec_prototype(&self, glib: &TokenStream) -> TokenStream {
-        let method_name = format_ident!("pspec_{}", self.name().to_snake_case());
-        quote! { fn #method_name(&self) -> &'static #glib::ParamSpec }
-    }
-    pub fn pspec_definition(
-        &self,
-        index: usize,
-        trait_name: &TokenStream,
-        glib: &TokenStream,
-    ) -> TokenStream {
-        let proto = self.pspec_prototype(glib);
-        let impl_trait = self.impl_trait(trait_name, glib);
-        quote! {
-            #proto { &#impl_trait::properties()[#index] }
-        }
-    }
-    pub fn notify_prototype(&self) -> TokenStream {
-        let method_name = format_ident!("notify_{}", self.name().to_snake_case());
-        quote! { fn #method_name(&self) }
-    }
-    pub fn notify_definition(
-        &self,
-        index: usize,
-        trait_name: &TokenStream,
-        glib: &TokenStream,
-    ) -> TokenStream {
-        let proto = self.notify_prototype();
-        let impl_trait = self.impl_trait(trait_name, glib);
-        quote! {
-            #proto {
-                self.notify_by_pspec(&#impl_trait::properties()[#index]);
+            if remove {
+                fields.remove(field_index);
+            } else {
+                field_index += 1;
             }
         }
-    }
-    pub fn connect_prototype(&self, glib: &TokenStream) -> TokenStream {
-        let method_name = format_ident!("connect_{}_notify", self.name().to_snake_case());
-        quote! {
-            fn #method_name<F: Fn(&Self) + 'static>(&self, f: F) -> #glib::SignalHandlerId
-        }
-    }
-    pub fn connect_definition(&self, glib: &TokenStream) -> TokenStream {
-        let proto = self.connect_prototype(glib);
-        let name = self.name();
-        quote! {
-            #proto {
-                self.connect_notify_local(
-                    Some(#name),
-                    move |recv, _| f(recv),
-                )
-            }
-        }
+        named.named = fields.into_iter().collect();
+        Ok(properties)
     }
     fn new(field: &syn::Field, pod: bool, iface: bool) -> Self {
         let storage = if iface {
@@ -413,16 +187,15 @@ impl Property {
             PropertyStorage::Field(field.ident.clone().expect("no field ident"))
         };
         Self {
-            field: None,
-            public: !matches!(&field.vis, syn::Visibility::Inherited),
             skip: !pod,
             ty: field.ty.clone(),
             special_type: PropertyType::Unspecified,
-            notify_public: false,
             storage,
             override_: None,
             get: pod.then(|| None),
             set: pod.then(|| None),
+            notify: true,
+            connect_notify: true,
             name: PropertyName::Field(field.ident.clone().expect("no field ident")),
             nick: None,
             blurb: None,
@@ -431,9 +204,9 @@ impl Property {
             flag_spans: vec![],
         }
     }
-    pub fn parse(mut field: syn::Field, pod: bool, iface: bool) -> syn::Result<Self> {
+    fn parse(mut field: syn::Field, pod: bool, iface: bool) -> syn::Result<Self> {
         let attr_pos = field.attrs.iter().position(|f| f.path.is_ident("property"));
-        let mut prop = if let Some(pos) = attr_pos {
+        let prop = if let Some(pos) = attr_pos {
             let attr = field.attrs.remove(pos);
             syn::parse::Parser::parse2(
                 constrain(|item| Self::parse_attr(item, &field, pod, iface)),
@@ -448,9 +221,6 @@ impl Property {
                 "Property must have at least one of `get` and `set`",
             ));
         }
-        if matches!(prop.storage, PropertyStorage::Field(_)) {
-            prop.field = Some(field);
-        }
         Ok(prop)
     }
     fn parse_attr(
@@ -460,7 +230,7 @@ impl Property {
         iface: bool,
     ) -> syn::Result<Self> {
         let mut prop = Self::new(field, pod, iface);
-        let mut begin = true;
+        let mut first = true;
         prop.skip = false;
         if stream.is_empty() {
             return Ok(prop);
@@ -469,7 +239,7 @@ impl Property {
         syn::parenthesized!(input in stream);
         while !input.is_empty() {
             let lookahead = input.lookahead1();
-            if begin && pod && lookahead.peek(keywords::skip) {
+            if first && pod && !iface && lookahead.peek(keywords::skip) {
                 input.parse::<keywords::skip>()?;
                 if !input.is_empty() {
                     return Err(syn::Error::new(input.span(), "Extra token(s) after `skip`"));
@@ -507,21 +277,33 @@ impl Property {
                 } else {
                     prop.set.replace(None);
                 }
-            } else if pod && lookahead.peek(Token![!]) {
+            } else if lookahead.peek(Token![!]) {
                 input.parse::<Token![!]>()?;
                 let lookahead = input.lookahead1();
-                if lookahead.peek(keywords::get) {
+                if pod && lookahead.peek(keywords::get) {
                     let kw = input.parse::<keywords::get>()?;
                     if !matches!(&prop.get, Some(None)) {
                         return Err(syn::Error::new_spanned(kw, "Duplicate `get` attribute"));
                     }
                     prop.get.take();
-                } else if lookahead.peek(keywords::set) {
+                } else if pod && lookahead.peek(keywords::set) {
                     let kw = input.parse::<keywords::set>()?;
                     if !matches!(&prop.set, Some(None)) {
                         return Err(syn::Error::new_spanned(kw, "Duplicate `set` attribute"));
                     }
                     prop.set.take();
+                } else if lookahead.peek(keywords::notify) {
+                    let kw = input.parse::<keywords::notify>()?;
+                    if !prop.notify {
+                        return Err(syn::Error::new_spanned(kw, "Duplicate `notify` attribute"));
+                    }
+                    prop.notify = false;
+                } else if lookahead.peek(keywords::connect_notify) {
+                    let kw = input.parse::<keywords::connect_notify>()?;
+                    if !prop.connect_notify {
+                        return Err(syn::Error::new_spanned(kw, "Duplicate `connect_notify` attribute"));
+                    }
+                    prop.connect_notify = false;
                 } else {
                     return Err(lookahead.error());
                 }
@@ -689,14 +471,6 @@ impl Property {
                 }
                 input.parse::<Token![=]>()?;
                 prop.storage = PropertyStorage::Delegate(Box::new(input.parse::<syn::Expr>()?));
-            } else if lookahead.peek(keywords::notify) {
-                let kw = input.parse::<keywords::notify>()?;
-                if prop.notify_public {
-                    return Err(syn::Error::new_spanned(kw, "Duplicate `notify` attribute"));
-                }
-                input.parse::<Token![=]>()?;
-                input.parse::<Token![pub]>()?;
-                prop.notify_public = true;
             } else {
                 use keywords::*;
 
@@ -734,7 +508,7 @@ impl Property {
                     deprecated:      deprecated      => PropertyFlags::DEPRECATED
                 }
             }
-            begin = false;
+            first = false;
             if !input.is_empty() {
                 input.parse::<Token![,]>()?;
             }
@@ -748,15 +522,6 @@ impl Property {
                 format!("Invalid property name '{}'. Property names must start with an ASCII letter and only contain ASCII letters, numbers, '-' or '_'", name),
             ));
         }
-        match &field.vis {
-            syn::Visibility::Inherited | syn::Visibility::Public(_) => {}
-            vis => {
-                return Err(syn::Error::new_spanned(
-                    vis,
-                    "Only `pub` or private is allowed for property visibility",
-                ))
-            }
-        };
         if prop.override_.is_some() {
             if let Some(nick) = &prop.nick {
                 return Err(syn::Error::new_spanned(
@@ -819,5 +584,275 @@ impl Property {
         }
 
         Ok(prop)
+    }
+    pub fn create(&self, go: &syn::Ident) -> TokenStream {
+        let glib = quote! { #go::glib };
+        let name = self.name();
+        if let Some(iface) = &self.override_ {
+            return quote! {
+                #glib::ParamSpecOverride::for_interface::<#iface>(#name)
+            };
+        }
+        let nick = self
+            .nick
+            .as_ref()
+            .map(|s| s.value())
+            .unwrap_or_else(|| name.clone());
+        let blurb = self
+            .blurb
+            .as_ref()
+            .map(|s| s.value())
+            .unwrap_or_else(|| name.clone());
+        let flags = self
+            .flags
+            .tokens(&glib, self.get.is_some(), self.set.is_some());
+        let ty = &self.ty;
+        let static_type = quote! {
+            <<<#ty as #go::ParamStore>::Type as #glib::value::ValueType>::Type as #glib::StaticType>::static_type(),
+        };
+        let props = self
+            .buildable_props
+            .iter()
+            .map(|(ident, value)| quote! { .#ident(#value) });
+        let builder = match &self.special_type {
+            PropertyType::Enum(_) => quote! {
+                <#go::ParamSpecEnumBuilder as ::core::default::Default>::default()
+            },
+            PropertyType::Flags(_) => quote! {
+                <#go::ParamSpecFlagsBuilder as ::core::default::Default>::default()
+            },
+            PropertyType::Boxed(_) => quote! {
+                <#go::ParamSpecBoxedBuilder as ::core::default::Default>::default()
+            },
+            PropertyType::Object(_) => quote! {
+                <#go::ParamSpecObjectBuilder as ::core::default::Default>::default()
+            },
+            _ => quote! { <#ty as #go::ParamSpecBuildable>::builder() },
+        };
+        let type_prop = match &self.special_type {
+            PropertyType::Unspecified => None,
+            PropertyType::Variant(_, element) => Some(quote! { .type_(#element) }),
+            _ => Some(quote! { .type_(#static_type) }),
+        };
+        quote! {
+            #builder
+            #type_prop
+            #(#props)*
+            .build(#name, #nick, #blurb, #flags)
+        }
+    }
+    pub fn name(&self) -> String {
+        match &self.name {
+            PropertyName::Field(name) => name.to_string().to_kebab_case(),
+            PropertyName::Custom(name) => name.value(),
+        }
+    }
+    pub fn name_span(&self) -> Span {
+        match &self.name {
+            PropertyName::Field(name) => name.span(),
+            PropertyName::Custom(name) => name.span(),
+        }
+    }
+    fn inner_type(&self, go: &syn::Ident) -> TokenStream {
+        let ty = &self.ty;
+        quote! { <#ty as #go::ParamStore>::Type }
+    }
+    fn is_interface(&self) -> bool {
+        matches!(self.storage, PropertyStorage::Interface)
+    }
+    fn field_storage(&self, go: Option<&syn::Ident>) -> TokenStream {
+        match &self.storage {
+            PropertyStorage::Field(field) => {
+                let recv = if let Some(go) = go {
+                    quote! { #go::glib::subclass::prelude::ObjectSubclassIsExt::imp(self) }
+                } else {
+                    quote! { self }
+                };
+                quote! { #recv.#field }
+            }
+            PropertyStorage::Delegate(delegate) => quote! { #delegate },
+            _ => unreachable!("cannot get storage for interface/virtual property"),
+        }
+    }
+    #[inline]
+    fn method_call(
+        method_name: &syn::Ident,
+        args: TokenStream,
+        trait_name: &syn::Ident,
+        glib: &TokenStream,
+    ) -> TokenStream {
+        quote! {
+            <<Self as #glib::subclass::types::ObjectSubclass>::Type as #trait_name>::#method_name(obj, #args)
+        }
+    }
+    pub fn get_impl(
+        &self,
+        index: usize,
+        trait_name: Option<&syn::Ident>,
+        go: &syn::Ident,
+    ) -> Option<TokenStream> {
+        if self.is_interface() {
+            return None;
+        }
+        self.get.as_ref().map(|expr| {
+            let glib = quote! { #go::glib };
+            let expr = if let Some(expr) = expr {
+                quote! { #glib::ToValue::to_value(&#expr()) }
+            } else if let Some(trait_name) = trait_name {
+                let method_name = format_ident!("{}", self.name().to_snake_case());
+                let call = Self::method_call(&method_name, quote! {}, trait_name, &glib);
+                    quote! { #glib::ToValue::to_value(&#call) }
+            } else {
+                let field = self.field_storage(None);
+                quote! { #go::ParamStoreRead::get_value(&#field) }
+            };
+            quote! {
+                #index => {
+                    #expr
+                }
+            }
+        })
+    }
+    pub fn getter_prototype(&self, go: &syn::Ident) -> Option<TokenStream> {
+        matches!(self.get, Some(None)).then(|| {
+            let method_name = format_ident!("{}", self.name().to_snake_case());
+            let ty = self.inner_type(go);
+            quote! { fn #method_name(&self) -> #ty }
+        })
+    }
+    pub fn getter_definition(&self, go: &syn::Ident) -> Option<TokenStream> {
+        matches!(self.get, Some(None)).then(|| {
+            let proto = self.getter_prototype(go).expect("no proto for getter");
+            let body = if self.is_interface() {
+                let name = self.name();
+                quote! { <Self as #go::glib::object::ObjectExt>::property(self, #name) }
+            } else {
+                let field = self.field_storage(Some(go));
+                let ty = self.inner_type(go);
+                quote! { #go::ParamStoreRead::get_value(&#field).get::<#ty>().unwrap() }
+            };
+            quote! {
+                #proto {
+                    #body
+                }
+            }
+        })
+    }
+    pub fn set_impl(
+        &self,
+        index: usize,
+        trait_name: Option<&syn::Ident>,
+        go: &syn::Ident,
+    ) -> Option<TokenStream> {
+        if self.is_interface() {
+            return None;
+        }
+        self.set.as_ref().map(|expr| {
+            let ty = self.inner_type(go);
+            let set = if let Some(expr) = &expr {
+                quote! { #expr(value.get::<#ty>().unwrap()); }
+            } else if trait_name.is_some() && self.flags.contains(PropertyFlags::EXPLICIT_NOTIFY) {
+                let method_name = format_ident!("set_{}", self.name().to_snake_case());
+                let glib = quote! { #go::glib };
+                Self::method_call(&method_name, quote! { value }, trait_name.unwrap(), &glib)
+            } else {
+                let field = self.field_storage(None);
+                quote! { #go::ParamStoreWrite::set_value(&#field, &value) }
+            };
+            quote! { #index => { #set; } }
+        })
+    }
+    pub fn setter_prototype(&self, go: &syn::Ident) -> Option<TokenStream> {
+        matches!(self.set, Some(None)).then(|| {
+            let method_name = format_ident!("set_{}", self.name().to_snake_case());
+            let ty = self.inner_type(go);
+            quote! { fn #method_name(&self, value: #ty) }
+        })
+    }
+    pub fn setter_definition(
+        &self,
+        index: usize,
+        properties_path: &TokenStream,
+        go: &syn::Ident,
+    ) -> Option<TokenStream> {
+        matches!(self.set, Some(None)).then(|| {
+            let proto = self.setter_prototype(go).expect("no setter proto");
+            let body =
+                if self.is_interface() || !self.flags.contains(PropertyFlags::EXPLICIT_NOTIFY) {
+                    let name = self.name();
+                    quote! {
+                        <Self as #go::glib::object::ObjectExt>::set_property(self, #name, value);
+                    }
+                } else {
+                    let field = self.field_storage(Some(go));
+                    quote! {
+                        if #go::ParamStoreWrite::set(&#field, &value) {
+                            <Self as #go::glib::object::ObjectExt>::notify_by_pspec(
+                                self,
+                                &#properties_path()[#index]
+                            );
+                        }
+                    }
+                };
+            quote! {
+                #proto {
+                    #body
+                }
+            }
+        })
+    }
+    pub fn pspec_prototype(&self, glib: &TokenStream) -> TokenStream {
+        let method_name = format_ident!("pspec_{}", self.name().to_snake_case());
+        quote! { fn #method_name(&self) -> &'static #glib::ParamSpec }
+    }
+    pub fn pspec_definition(
+        &self,
+        index: usize,
+        properties_path: &TokenStream,
+        glib: &TokenStream,
+    ) -> TokenStream {
+        let proto = self.pspec_prototype(glib);
+        quote! {
+            #proto { &#properties_path()[#index] }
+        }
+    }
+    pub fn notify_prototype(&self) -> TokenStream {
+        let method_name = format_ident!("notify_{}", self.name().to_snake_case());
+        quote! { fn #method_name(&self) }
+    }
+    pub fn notify_definition(
+        &self,
+        index: usize,
+        properties_path: &TokenStream,
+        glib: &TokenStream,
+    ) -> TokenStream {
+        let proto = self.notify_prototype();
+        quote! {
+            #proto {
+                <Self as #glib::object::ObjectExt>::notify_by_pspec(
+                    self,
+                    &#properties_path()[#index]
+                );
+            }
+        }
+    }
+    pub fn connect_prototype(&self, glib: &TokenStream) -> TokenStream {
+        let method_name = format_ident!("connect_{}_notify", self.name().to_snake_case());
+        quote! {
+            fn #method_name<F: Fn(&Self) + 'static>(&self, f: F) -> #glib::SignalHandlerId
+        }
+    }
+    pub fn connect_definition(&self, glib: &TokenStream) -> TokenStream {
+        let proto = self.connect_prototype(glib);
+        let name = self.name();
+        quote! {
+            #proto {
+                <Self as #glib::object::ObjectExt>::connect_notify_local(
+                    self,
+                    Some(#name),
+                    move |recv, _| f(recv),
+                )
+            }
+        }
     }
 }

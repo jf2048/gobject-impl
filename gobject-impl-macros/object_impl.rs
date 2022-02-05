@@ -1,6 +1,6 @@
 use proc_macro2::TokenStream;
 use proc_macro_error::abort;
-use quote::{format_ident, quote};
+use quote::quote;
 
 use super::util::*;
 
@@ -12,113 +12,82 @@ impl syn::parse::Parse for ObjectImplArgs {
     }
 }
 
-pub fn object_impl(args: ObjectImplArgs, item: proc_macro::TokenStream) -> TokenStream {
+pub fn object_impl(args: ObjectImplArgs, item: syn::ItemImpl) -> TokenStream {
     let Args {
-        type_,
-        impl_trait,
-        public_trait,
-        private_trait,
+        trait_,
         pod,
+        ..
     } = args.0;
 
-    if type_.is_some() {
-        if let Some(public_trait) = &public_trait {
-            abort!(public_trait, "`public_trait` not allowed with `type`",);
-        }
-        if let Some(private_trait) = &private_trait {
-            abort!(private_trait, "`private_trait` not allowed with `type`",);
-        }
-    }
-
-    let definition = syn::parse::Parser::parse(
-        constrain(|item| ObjectDefinition::parse(item, pod, false)),
-        item,
-    )
-    .unwrap_or_else(|e| abort!(e));
-    let header = definition.header_tokens();
+    let definition = ObjectDefinition::new(item, pod, false)
+        .unwrap_or_else(|e| abort!(e));
 
     let ObjectDefinition {
-        definition,
-        generics,
+        mut item,
+        struct_item,
         properties,
         signals,
-        items,
-        ..
     } = definition;
-
-    let ident = match &definition {
-        DefinitionType::Object { ident } => ident,
-        _ => unreachable!(),
-    };
 
     let go = go_crate_ident();
     let glib = quote! { #go::glib };
 
-    let impl_trait_name =
-        impl_trait.map(|c| c.unwrap_or_else(|| format_ident!("{}CustomObjectImplExt", ident)));
-    let impl_trait = impl_trait_name.as_ref().map(|impl_trait_name| {
-        quote! {
-            trait #impl_trait_name: #glib::subclass::types::ObjectSubclass + #glib::subclass::object::ObjectImpl {
-                fn properties() -> &'static [#glib::ParamSpec];
-                fn signals() -> &'static [#glib::subclass::Signal];
-                fn set_property(&self, obj: &<Self as #glib::subclass::types::ObjectSubclass>::Type, _id: usize, _value: &#glib::Value, _pspec: &#glib::ParamSpec);
-                fn property(&self, obj: &<Self as #glib::subclass::types::ObjectSubclass>::Type, _id: usize, _pspec: &#glib::ParamSpec) -> #glib::Value;
-                fn constructed(&self, obj: &<Self as #glib::subclass::types::ObjectSubclass>::Type) {
-                    <Self as #glib::subclass::object::ObjectImplExt>::parent_constructed(self, obj);
-                }
-                fn dispose(&self, _obj: &<Self as #glib::subclass::types::ObjectSubclass>::Type) {}
-            }
-        }
-    });
-    let trait_name = if impl_trait.is_some() {
-        quote! { #impl_trait_name }
+    let (has_signals, signals_ident) = has_method(&item.items, "signals");
+    let (has_properties, properties_ident) = has_method(&item.items, "properties");
+    let (has_set_property, set_property_ident) = has_method(&item.items, "set_property");
+    let (has_property, property_ident) = has_method(&item.items, "property");
+
+    let subclass = quote! { <Self as #glib::object::ObjectSubclassIs>::Subclass };
+    let signals_path = if has_signals {
+        quote! { #subclass::#signals_ident }
     } else {
-        quote! { #glib::subclass::object::ObjectImpl }
+        quote! { <#subclass as #glib::subclass::object::ObjectImpl>::#signals_ident }
+    };
+    let properties_path = if has_properties {
+        quote! { #subclass::#properties_ident }
+    } else {
+        quote! { <#subclass as #glib::subclass::object::ObjectImpl>::#properties_ident }
     };
 
-    let public_trait = public_trait.unwrap_or_else(|| format_ident!("{}ObjectExt", ident));
-    let private_trait = private_trait.unwrap_or_else(|| format_ident!("{}ObjectImplExt", ident));
-
-    let method_type = type_.map(OutputMethods::Type).unwrap_or_else(|| {
-        OutputMethods::Trait(
-            quote! { <#ident as #glib::subclass::types::ObjectSubclass>::Type },
-            generics.clone(),
-        )
-    });
-
     let Output {
-        private_impl_methods,
-        define_methods,
+        mut private_impl_methods,
         prop_set_impls,
         prop_get_impls,
         prop_defs,
         signal_defs,
+        ext_trait,
     } = Output::new(
+        &item,
         &signals,
         &properties,
-        method_type,
-        &trait_name,
-        Some(&public_trait),
-        Some(&private_trait),
+        None,
+        Some(&trait_),
+        &signals_path,
+        &properties_path,
         &go,
     );
 
-    let fields = properties.iter().filter_map(|p| p.field.as_ref());
-    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-
-    quote! {
-        #header {
-            #(#fields),*
-        }
-        #impl_trait
-        impl #trait_name for #ident {
-            fn properties() -> &'static [#glib::ParamSpec] {
-                #prop_defs
-            }
-            fn signals() -> &'static [#glib::subclass::Signal] {
+    if let Some(signal_defs) = &signal_defs {
+        let signals_def = quote! {
+            fn #signals_ident() -> &'static [#glib::subclass::Signal] {
                 #signal_defs
             }
-            fn set_property(
+        };
+        if has_signals {
+            private_impl_methods.push(signals_def);
+        } else {
+            item.items.push(syn::ImplItem::Verbatim(signals_def));
+        }
+    }
+
+    if let Some(prop_defs) = &prop_defs {
+        let properties_def = quote! {
+            fn #properties_ident() -> &'static [#glib::ParamSpec] {
+                #prop_defs
+            }
+        };
+        let set_property_def = quote! {
+            fn #set_property_ident(
                 &self,
                 obj: &<Self as #glib::subclass::types::ObjectSubclass>::Type,
                 id: usize,
@@ -136,7 +105,9 @@ pub fn object_impl(args: ObjectImplArgs, item: proc_macro::TokenStream) -> Token
                     )
                 }
             }
-            fn property(
+        };
+        let property_def = quote! {
+            fn #property_ident(
                 &self,
                 obj: &<Self as #glib::subclass::types::ObjectSubclass>::Type,
                 id: usize,
@@ -153,11 +124,33 @@ pub fn object_impl(args: ObjectImplArgs, item: proc_macro::TokenStream) -> Token
                     )
                 }
             }
-            #(#items)*
+        };
+        if has_properties {
+            private_impl_methods.push(properties_def);
+        } else {
+            item.items.push(syn::ImplItem::Verbatim(properties_def));
         }
-        impl #impl_generics #ident #ty_generics #where_clause {
+        if has_set_property {
+            private_impl_methods.push(set_property_def);
+        } else {
+            item.items.push(syn::ImplItem::Verbatim(set_property_def));
+        }
+        if has_property {
+            private_impl_methods.push(property_def);
+        } else {
+            item.items.push(syn::ImplItem::Verbatim(property_def));
+        }
+    }
+
+    let self_ty = &item.self_ty;
+    let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
+
+    quote! {
+        #struct_item
+        #item
+        impl #impl_generics #self_ty #ty_generics #where_clause {
             #(#private_impl_methods)*
         }
-        #define_methods
+        #ext_trait
     }
 }

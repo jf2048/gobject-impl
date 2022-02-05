@@ -5,13 +5,9 @@ use quote::{format_ident, quote};
 use syn::{parse::Parse, Token};
 
 pub mod keywords {
-    // signal keywords
-    syn::custom_keyword!(signal);
-    syn::custom_keyword!(accumulator);
-
-    // signal attributes
     syn::custom_keyword!(name);
     syn::custom_keyword!(emit);
+    syn::custom_keyword!(connect);
     syn::custom_keyword!(run_first);
     syn::custom_keyword!(run_last);
     syn::custom_keyword!(run_cleanup);
@@ -60,7 +56,8 @@ impl SignalFlags {
 
 pub struct SignalAttrs {
     pub flags: SignalFlags,
-    pub emit_public: bool,
+    pub emit: bool,
+    pub connect: bool,
     pub name: Option<String>,
 }
 
@@ -68,27 +65,38 @@ impl Parse for SignalAttrs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let mut attrs = Self {
             flags: SignalFlags::empty(),
-            emit_public: false,
+            emit: true,
+            connect: true,
             name: None,
         };
 
         while !input.is_empty() {
             let lookahead = input.lookahead1();
-            if lookahead.peek(keywords::emit) {
-                let kw = input.parse::<keywords::emit>()?;
-                if attrs.emit_public {
-                    return Err(syn::Error::new_spanned(kw, "Duplicate `emit` attribute"));
-                }
-                input.parse::<Token![=]>()?;
-                input.parse::<Token![pub]>()?;
-                attrs.emit_public = true;
-            } else if lookahead.peek(keywords::name) {
+            if lookahead.peek(keywords::name) {
                 let kw = input.parse::<keywords::name>()?;
                 if attrs.name.is_some() {
                     return Err(syn::Error::new_spanned(kw, "Duplicate `name` attribute"));
                 }
                 input.parse::<Token![=]>()?;
                 attrs.name = Some(input.parse::<syn::LitStr>()?.value());
+            } else if lookahead.peek(Token![!]) {
+                input.parse::<Token![!]>()?;
+                let lookahead = input.lookahead1();
+                if lookahead.peek(keywords::emit) {
+                    let kw = input.parse::<keywords::emit>()?;
+                    if !attrs.emit {
+                        return Err(syn::Error::new_spanned(kw, "Duplicate `emit` attribute"));
+                    }
+                    attrs.emit = false;
+                } else if lookahead.peek(keywords::connect) {
+                    let kw = input.parse::<keywords::connect>()?;
+                    if !attrs.connect {
+                        return Err(syn::Error::new_spanned(kw, "Duplicate `connect` attribute"));
+                    }
+                    attrs.connect = false;
+                } else {
+                    return Err(lookahead.error());
+                }
             } else {
                 use keywords::*;
 
@@ -142,12 +150,10 @@ pub struct Signal {
     pub name: String,
     pub flags: SignalFlags,
     pub interface: bool,
-    pub public: bool,
-    pub emit_public: bool,
-    pub inputs: Option<Vec<syn::FnArg>>,
-    pub output: syn::ReturnType,
-    pub block: Option<Box<syn::Block>>,
-    pub accumulator: Option<(keywords::accumulator, Vec<syn::FnArg>, Box<syn::Block>)>,
+    pub emit: bool,
+    pub connect: bool,
+    pub handler: Option<syn::ImplItemMethod>,
+    pub accumulator: Option<syn::ImplItemMethod>,
 }
 
 impl Signal {
@@ -157,31 +163,24 @@ impl Signal {
             name: Default::default(),
             flags: SignalFlags::empty(),
             interface: false,
-            public: false,
-            emit_public: false,
-            inputs: Default::default(),
-            output: syn::ReturnType::Default,
-            block: Default::default(),
-            accumulator: Default::default(),
+            emit: true,
+            connect: true,
+            handler: None,
+            accumulator: None,
         }
     }
-    fn inputs(&self) -> &Vec<syn::FnArg> {
-        self.inputs.as_ref().unwrap_or_else(|| {
-            let (acc_kw, _, _) = self.accumulator.as_ref().expect("no accumulator");
-            abort!(acc_kw, format!("No definition for signal `{}`", self.name));
-        })
+    fn inputs(&self) -> impl Iterator<Item = &syn::FnArg> + Clone {
+        self
+            .handler
+            .as_ref()
+            .map(|s| s.sig.inputs.iter())
+            .unwrap_or_else(|| {
+                let acc = self.accumulator.as_ref().expect("no accumulator");
+                abort!(acc, format!("No definition for signal `{}`", self.name));
+            })
     }
-    fn impl_trait(&self, trait_name: &TokenStream, glib: &TokenStream) -> TokenStream {
-        let imp = if self.interface {
-            quote! { <Self as #glib::ObjectType>::GlibClassType }
-        } else {
-            quote! { <Self as #glib::object::ObjectSubclassIs>::Subclass }
-        };
-        quote! { <#imp as #trait_name> }
-    }
-    fn arg_names(&self) -> impl Iterator<Item = syn::Ident> + '_ {
+    fn arg_names(&self) -> impl Iterator<Item = syn::Ident> + Clone + '_ {
         self.inputs()
-            .iter()
             .enumerate()
             .map(|(i, _)| format_ident!("arg{}", i))
     }
@@ -191,7 +190,7 @@ impl Signal {
         imp: bool,
         glib: &'a TokenStream,
     ) -> impl Iterator<Item = TokenStream> + 'a {
-        self.inputs().iter().enumerate().map(move |(index, input)| {
+        self.inputs().enumerate().map(move |(index, input)| {
             let ty = match input {
                 syn::FnArg::Receiver(_) => {
                     if imp {
@@ -222,22 +221,22 @@ impl Signal {
         let Self {
             name,
             flags,
-            output,
-            block,
+            handler,
             accumulator,
             ..
         } = self;
 
+        let handler = handler.as_ref().unwrap();
         let inputs = self.inputs();
-        let input_static_types = inputs.iter().map(|input| quote! {
+        let input_static_types = inputs.map(|input| quote! {
             <#glib::subclass::SignalType as ::core::convert::From<#glib::types::StaticType>>::from(
                 <#input as #glib::types::StaticType>::static_type()
             )
         });
         let arg_names = self.arg_names();
         let args_unwrap = self.args_unwrap(object_type, true, glib);
-        let class_handler = block.is_some().then(|| {
-            let method_name = self.handler_name();
+        let class_handler = (!handler.block.stmts.is_empty()).then(|| {
+            let method_name = &handler.sig.ident;
             quote! {
                 let builder = builder.class_handler(|_, args| {
                     #(#args_unwrap)*
@@ -246,17 +245,17 @@ impl Signal {
                 });
             }
         });
-        let accumulator = accumulator.as_ref().map(|(_, args, block)| {
+        let accumulator = accumulator.as_ref().map(|method| {
+            let ident = &method.sig.ident;
             quote! {
                 let builder = builder.accumulator(|hint, acc, value| {
-                    fn ____accumulator(#(#args),*) -> bool {
-                        #block
-                    }
-                    ____accumulator(hint, acc, value)
+                    #method
+                    #ident(hint, acc, value)
                 });
             }
         });
         let flags = flags.tokens(glib);
+        let output = &handler.sig.output;
         quote! {
             {
                 let builder = #glib::subclass::Signal::builder(
@@ -273,18 +272,11 @@ impl Signal {
             }
         }
     }
-    fn handler_name(&self) -> syn::Ident {
-        format_ident!("{}_class_handler", self.name.to_snake_case())
-    }
     pub fn handler_definition(&self) -> Option<TokenStream> {
-        if let Some(block) = &self.block {
-            let Self { inputs, output, .. } = self;
-            let inputs = inputs.as_ref().expect("no inputs");
-            let method_name = self.handler_name();
+        let handler = self.handler.as_ref().unwrap();
+        if !handler.block.stmts.is_empty() {
             Some(quote! {
-                fn #method_name(#(#inputs),*) #output {
-                    #block
-                }
+                #handler
             })
         } else {
             None
@@ -292,7 +284,6 @@ impl Signal {
     }
     fn emit_arg_defs(&self) -> impl Iterator<Item = syn::PatType> + Clone + '_ {
         self.inputs()
-            .iter()
             .skip(1)
             .enumerate()
             .map(|(index, arg)| {
@@ -323,19 +314,19 @@ impl Signal {
     pub fn signal_definition(
         &self,
         index: usize,
-        trait_name: &TokenStream,
+        signals_path: &TokenStream,
         glib: &TokenStream,
     ) -> TokenStream {
         let proto = self.signal_prototype(glib);
-        let impl_trait = self.impl_trait(trait_name, glib);
         quote! {
             #proto {
-                &#impl_trait::signals()[#index]
+                &#signals_path()[#index]
             }
         }
     }
     pub fn emit_prototype(&self, glib: &TokenStream) -> TokenStream {
-        let Self { output, .. } = self;
+        let handler = self.handler.as_ref().unwrap();
+        let output = &handler.sig.output;
         let method_name = format_ident!("emit_{}", self.name.to_snake_case());
         let arg_defs = self.emit_arg_defs();
         let details_arg = self
@@ -349,7 +340,7 @@ impl Signal {
     pub fn emit_definition(
         &self,
         index: usize,
-        trait_name: &TokenStream,
+        signals_path: &TokenStream,
         glib: &TokenStream,
     ) -> TokenStream {
         let proto = self.emit_prototype(glib);
@@ -358,8 +349,7 @@ impl Signal {
             syn::Pat::Ident(syn::PatIdent { ident, .. }) => ident.clone(),
             _ => unimplemented!(),
         });
-        let impl_trait = self.impl_trait(trait_name, glib);
-        let signal_id = quote! { #impl_trait::signals()[#index].signal_id() };
+        let signal_id = quote! { #signals_path()[#index].signal_id() };
         let emit = {
             let arg_names = arg_names.clone();
             quote! {
@@ -394,8 +384,9 @@ impl Signal {
     }
     pub fn connect_prototype(&self, glib: &TokenStream) -> TokenStream {
         let method_name = format_ident!("connect_{}", self.name.to_snake_case());
-        let Self { output, .. } = self;
-        let input_types = self.inputs().iter().skip(1).map(|arg| match arg {
+        let handler = self.handler.as_ref().unwrap();
+        let output = &handler.sig.output;
+        let input_types = self.inputs().skip(1).map(|arg| match arg {
             syn::FnArg::Typed(t) => &t.ty,
             _ => unimplemented!(),
         });
@@ -414,13 +405,12 @@ impl Signal {
     pub fn connect_definition(
         &self,
         index: usize,
-        trait_name: &TokenStream,
+        signals_path: &TokenStream,
         glib: &TokenStream,
     ) -> TokenStream {
         let proto = self.connect_prototype(glib);
         let arg_names = self.arg_names();
         let args_unwrap = self.args_unwrap(None, false, glib);
-        let impl_trait = self.impl_trait(trait_name, glib);
 
         let details = if self.flags.contains(SignalFlags::DETAILED) {
             quote! { details, }
@@ -430,8 +420,9 @@ impl Signal {
 
         quote! {
             #proto {
-                self.connect_local_id(
-                    #impl_trait::signals()[#index].signal_id(),
+                <Self as #glib::object::ObjectExt>::connect_local_id(
+                    self,
+                    #signals_path()[#index].signal_id(),
                     #details,
                     false,
                     move |args| {

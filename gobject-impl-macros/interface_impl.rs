@@ -12,100 +12,96 @@ impl syn::parse::Parse for InterfaceImplArgs {
     }
 }
 
-pub fn interface_impl(args: InterfaceImplArgs, item: proc_macro::TokenStream) -> TokenStream {
+pub fn interface_impl(args: InterfaceImplArgs, item: syn::ItemImpl) -> TokenStream {
     let Args {
         type_,
-        impl_trait,
+        trait_,
         pod,
-        ..
     } = args.0;
 
     let type_ = type_.unwrap_or_else(|| {
         abort_call_site!("`type` attribute required for `interface_impl`");
     });
-    if matches!(impl_trait, Some(None)) {
-        abort_call_site!("`impl_trait` attribute must specify a type");
-    }
 
-    let definition = syn::parse::Parser::parse(
-        constrain(|item| ObjectDefinition::parse(item, pod, true)),
-        item,
-    )
-    .unwrap_or_else(|e| abort!(e));
-    let header = definition.header_tokens();
+    let definition = ObjectDefinition::new(item, pod, true)
+        .unwrap_or_else(|e| abort!(e));
 
     let ObjectDefinition {
-        attrs,
-        vis,
-        definition,
-        generics,
+        mut item,
         properties,
         signals,
-        items,
+        ..
     } = definition;
-
-    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-    let self_ty = match &definition {
-        DefinitionType::Interface { self_ty, .. } => self_ty,
-        _ => unreachable!(),
-    };
 
     let go = go_crate_ident();
     let glib = quote! { #go::glib };
 
-    let impl_trait_name = impl_trait.flatten();
-    let header = if let Some(impl_trait_name) = &impl_trait_name {
-        quote! {
-            #(#attrs)*
-            #vis impl #impl_generics #impl_trait_name for #self_ty #ty_generics #where_clause
-        }
+    let (has_signals, signals_ident) = has_method(&item.items, "signals");
+    let (has_properties, properties_ident) = has_method(&item.items, "properties");
+
+    let subclass = quote! { <Self as #glib::ObjectType>::GlibClassType };
+    let signals_path = if has_signals {
+        quote! { #subclass::#signals_ident }
     } else {
-        header
+        quote! { <#subclass as #glib::subclass::prelude::ObjectInterface>::#signals_ident }
     };
-    let impl_trait = impl_trait_name.as_ref().map(|impl_trait_name| {
-        quote! {
-            trait #impl_trait_name: #glib::subclass::prelude::ObjectInterface {
-                fn properties() -> &'static [#glib::ParamSpec];
-                fn signals() -> &'static [#glib::subclass::Signal];
-            }
-        }
-    });
-    let trait_name = if impl_trait.is_some() {
-        quote! { #impl_trait_name }
+    let properties_path = if has_properties {
+        quote! { #subclass::#properties_ident }
     } else {
-        quote! { #glib::subclass::prelude::ObjectInterface }
+        quote! { <#subclass as #glib::subclass::prelude::ObjectInterface>::#properties_ident }
     };
 
     let Output {
-        private_impl_methods,
-        define_methods,
+        mut private_impl_methods,
         prop_defs,
         signal_defs,
+        ext_trait,
         ..
     } = Output::new(
+        &item,
         &signals,
         &properties,
-        OutputMethods::Type(type_),
-        &trait_name,
-        None,
-        None,
+        Some(&type_),
+        Some(&trait_),
+        &signals_path,
+        &properties_path,
         &go,
     );
 
-    quote! {
-        #impl_trait
-        #header {
-            fn properties() -> &'static [#glib::ParamSpec] {
-                #prop_defs
-            }
-            fn signals() -> &'static [#glib::subclass::Signal] {
+    if let Some(signal_defs) = &signal_defs {
+        let signals_def = quote! {
+            fn #signals_ident() -> &'static [#glib::subclass::Signal] {
                 #signal_defs
             }
-            #(#items)*
+        };
+        if has_signals {
+            private_impl_methods.push(signals_def);
+        } else {
+            item.items.push(syn::ImplItem::Verbatim(signals_def));
         }
+    }
+
+    if let Some(prop_defs) = &prop_defs {
+        let properties_def = quote! {
+            fn #properties_ident() -> &'static [#glib::ParamSpec] {
+                #prop_defs
+            }
+        };
+        if has_properties {
+            private_impl_methods.push(properties_def);
+        } else {
+            item.items.push(syn::ImplItem::Verbatim(properties_def));
+        }
+    }
+
+    let self_ty = &item.self_ty;
+    let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
+
+    quote! {
+        #item
         impl #impl_generics #self_ty #ty_generics #where_clause {
             #(#private_impl_methods)*
         }
-        #define_methods
+        #ext_trait
     }
 }
