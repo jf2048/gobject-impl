@@ -49,6 +49,8 @@ fn props() {
                 my_delegate: Cell<bool>,
                 #[property(get, set, explicit_notify)]
                 my_explicit: Cell<u64>,
+                #[property(get, set, !notify, !connect_notify)]
+                my_no_defaults: Cell<u64>,
 
                 inner: BasicPropsInner
             }
@@ -69,8 +71,8 @@ fn props() {
     }
 
     let props = BasicProps::default();
-    assert_eq!(BasicPropsPrivate::properties().len(), 7);
-    assert_eq!(props.list_properties().len(), 7);
+    assert_eq!(BasicPropsPrivate::properties().len(), 8);
+    assert_eq!(props.list_properties().len(), 8);
     props.connect_my_i32_notify(|props| props.set_my_str("Updated".into()));
     assert_eq!(props.my_str(), "");
     props.set_my_i32(5);

@@ -97,7 +97,9 @@ pub fn object_impl(args: ObjectImplArgs, item: syn::ItemImpl) -> TokenStream {
                         id,
                         pspec.name(),
                         pspec.type_().name(),
-                        obj.type_().name()
+                        <<Self as #glib::subclass::types::ObjectSubclass>::Type as #go::glib::object::ObjectExt>::type_(
+                            obj
+                        ).name()
                     )
                 }
             }
@@ -116,7 +118,9 @@ pub fn object_impl(args: ObjectImplArgs, item: syn::ItemImpl) -> TokenStream {
                         id,
                         pspec.name(),
                         pspec.type_().name(),
-                        obj.type_().name()
+                        <<Self as #glib::subclass::types::ObjectSubclass>::Type as #go::glib::object::ObjectExt>::type_(
+                            obj
+                        ).name()
                     )
                 }
             }

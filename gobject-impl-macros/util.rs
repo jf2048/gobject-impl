@@ -389,15 +389,26 @@ impl Output {
             if prop.skip {
                 continue;
             }
-            prototypes.push(make_stmt(prop.pspec_prototype(&glib)));
-            methods.push(prop.pspec_definition(index, properties_path, &glib));
-            if prop.notify {
-                prototypes.push(make_stmt(prop.notify_prototype()));
-                methods.push(prop.notify_definition(index, properties_path, &glib));
+            if let Some(pspec) = prop.pspec_prototype(&glib) {
+                prototypes.push(make_stmt(pspec));
+                methods.push(
+                    prop.pspec_definition(index, properties_path, &glib)
+                        .expect("no pspec definition"),
+                );
             }
-            if prop.connect_notify {
-                prototypes.push(make_stmt(prop.connect_prototype(&glib)));
-                methods.push(prop.connect_definition(&glib));
+            if let Some(notify) = prop.notify_prototype() {
+                prototypes.push(make_stmt(notify));
+                methods.push(
+                    prop.notify_definition(index, properties_path, &glib)
+                        .expect("no notify definition"),
+                );
+            }
+            if let Some(connect_notify) = prop.connect_prototype(&glib) {
+                prototypes.push(make_stmt(connect_notify));
+                methods.push(
+                    prop.connect_definition(&glib)
+                        .expect("no connect notify definition"),
+                );
             }
             if let Some(getter) = prop.getter_prototype(go) {
                 prototypes.push(make_stmt(getter));

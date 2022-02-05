@@ -123,8 +123,8 @@ pub struct Property {
     pub override_: Option<syn::Type>,
     pub get: Option<Option<syn::Ident>>,
     pub set: Option<Option<syn::Ident>>,
-    pub notify: bool,
-    pub connect_notify: bool,
+    pub no_notify: Option<keywords::notify>,
+    pub no_connect_notify: Option<keywords::connect_notify>,
     pub name: PropertyName,
     pub nick: Option<syn::LitStr>,
     pub blurb: Option<syn::LitStr>,
@@ -196,8 +196,8 @@ impl Property {
             override_: None,
             get: pod.then(|| None),
             set: pod.then(|| None),
-            notify: true,
-            connect_notify: true,
+            no_notify: None,
+            no_connect_notify: None,
             name: PropertyName::Field(field.ident.clone().expect("no field ident")),
             nick: None,
             blurb: None,
@@ -250,9 +250,9 @@ impl Property {
                 }
                 if pod || input.peek(Token![=]) {
                     input.parse::<Token![=]>()?;
-                    if iface {
-                        let token = input.parse::<Token![_]>()?;
-                        prop.get.replace(Some(syn::parse2(quote! { #token })?));
+                    if iface || input.peek(Token![_]) {
+                        input.parse::<Token![_]>()?;
+                        prop.get.replace(Some(format_ident!("_")));
                     } else {
                         prop.get.replace(Some(input.parse()?));
                     }
@@ -266,9 +266,9 @@ impl Property {
                 }
                 if pod || input.peek(Token![=]) {
                     input.parse::<Token![=]>()?;
-                    if iface {
-                        let token = input.parse::<Token![_]>()?;
-                        prop.set.replace(Some(syn::parse2(quote! { #token })?));
+                    if iface || input.peek(Token![_]) {
+                        input.parse::<Token![_]>()?;
+                        prop.set.replace(Some(format_ident!("_")));
                     } else {
                         prop.set.replace(Some(input.parse()?));
                     }
@@ -292,19 +292,19 @@ impl Property {
                     prop.set.take();
                 } else if lookahead.peek(keywords::notify) {
                     let kw = input.parse::<keywords::notify>()?;
-                    if !prop.notify {
+                    if prop.no_notify.is_some() {
                         return Err(syn::Error::new_spanned(kw, "Duplicate `notify` attribute"));
                     }
-                    prop.notify = false;
+                    prop.no_notify.replace(kw);
                 } else if lookahead.peek(keywords::connect_notify) {
                     let kw = input.parse::<keywords::connect_notify>()?;
-                    if !prop.connect_notify {
+                    if prop.no_connect_notify.is_some() {
                         return Err(syn::Error::new_spanned(
                             kw,
                             "Duplicate `connect_notify` attribute",
                         ));
                     }
-                    prop.connect_notify = false;
+                    prop.no_connect_notify.replace(kw);
                 } else {
                     return Err(lookahead.error());
                 }
@@ -530,11 +530,15 @@ impl Property {
                         format!("`{}` not allowed on override property", ident),
                     ));
                 }
-                if let Some(flag) = prop.flag_spans.first() {
-                    return Err(syn::Error::new(
-                        *flag,
-                        "flag not allowed on override property",
-                    ));
+                for span in &prop.flag_spans {
+                    let flag = span.unwrap().source_text();
+                    let flag = flag.as_deref().unwrap_or_default();
+                    if flag != "explicit_notify" {
+                        return Err(syn::Error::new(
+                            *span,
+                            format!("{} not allowed on override property", flag),
+                        ));
+                    }
                 }
                 if let Some(span) = prop.special_type.span() {
                     return Err(syn::Error::new(
@@ -542,15 +546,41 @@ impl Property {
                         "type specifier not allowed on override property",
                     ));
                 }
+                if let Some(notify) = &prop.no_notify {
+                    return Err(syn::Error::new_spanned(
+                        notify,
+                        "`notify` not allowed on override property",
+                    ));
+                }
+                if let Some(connet_notify) = &prop.no_connect_notify {
+                    return Err(syn::Error::new_spanned(
+                        connet_notify,
+                        "`connect_notify` not allowed on override property",
+                    ));
+                }
             }
             if let PropertyStorage::Virtual(_) = &prop.storage {
                 if matches!(prop.get, Some(None)) {
-                    prop.get
-                        .replace(Some(format_ident!("{}", prop.name().to_snake_case())));
+                    prop.get.replace(Some(prop.getter_name()));
                 }
                 if matches!(prop.set, Some(None)) {
-                    prop.set
-                        .replace(Some(format_ident!("set_{}", prop.name().to_snake_case())));
+                    prop.set.replace(Some(prop.setter_name()));
+                }
+            }
+            if !iface {
+                let getter = prop
+                    .get
+                    .as_ref()
+                    .and_then(|i| i.as_ref().map(|i| i.to_string()));
+                if matches!(getter.as_deref(), Some("_")) {
+                    prop.get.replace(Some(prop.getter_name()));
+                }
+                let setter = prop
+                    .set
+                    .as_ref()
+                    .and_then(|i| i.as_ref().map(|i| i.to_string()));
+                if matches!(setter.as_deref(), Some("_")) {
+                    prop.set.replace(Some(prop.setter_name()));
                 }
             }
         }
@@ -663,6 +693,14 @@ impl Property {
             <<Self as #glib::subclass::types::ObjectSubclass>::Type as #trait_name>::#method_name(obj, #args)
         }
     }
+    #[inline]
+    fn getter_name(&self) -> syn::Ident {
+        format_ident!("{}", self.name().to_snake_case())
+    }
+    #[inline]
+    fn setter_name(&self) -> syn::Ident {
+        format_ident!("set_{}", self.name().to_snake_case())
+    }
     pub fn get_impl(
         &self,
         index: usize,
@@ -676,13 +714,18 @@ impl Property {
             let glib = quote! { #go::glib };
             let expr = if let Some(method) = method {
                 quote! { #glib::ToValue::to_value(&obj.#method()) }
-            } else if let Some(trait_name) = trait_name {
-                let method_name = format_ident!("{}", self.name().to_snake_case());
-                let call = Self::method_call(&method_name, quote! {}, trait_name, &glib);
-                quote! { #glib::ToValue::to_value(&#call) }
             } else {
-                let field = self.field_storage(None, go);
-                quote! { #go::ParamStoreRead::get_value(&#field) }
+                match (trait_name, self.override_.is_some()) {
+                    (Some(trait_name), false) => {
+                        let method_name = self.getter_name();
+                        let call = Self::method_call(&method_name, quote! {}, trait_name, &glib);
+                        quote! { #glib::ToValue::to_value(&#call) }
+                    }
+                    _ => {
+                        let field = self.field_storage(None, go);
+                        quote! { #go::ParamStoreRead::get_value(&#field) }
+                    }
+                }
             };
             quote! {
                 #index => {
@@ -692,8 +735,11 @@ impl Property {
         })
     }
     pub fn getter_prototype(&self, go: &syn::Ident) -> Option<TokenStream> {
+        if self.override_.is_some() {
+            return None;
+        }
         matches!(self.get, Some(None)).then(|| {
-            let method_name = format_ident!("{}", self.name().to_snake_case());
+            let method_name = self.getter_name();
             let ty = self.inner_type(go);
             quote! { fn #method_name(&self) -> #ty }
         })
@@ -703,8 +749,7 @@ impl Property {
         object_type: &TokenStream,
         go: &syn::Ident,
     ) -> Option<TokenStream> {
-        matches!(self.get, Some(None)).then(|| {
-            let proto = self.getter_prototype(go).expect("no proto for getter");
+        self.getter_prototype(go).map(|proto| {
             let body = if self.is_interface() {
                 let name = self.name();
                 quote! { <Self as #go::glib::object::ObjectExt>::property(self, #name) }
@@ -733,30 +778,45 @@ impl Property {
             let set = if let Some(method) = &method {
                 quote! { obj.#method(value.get_owned::<#ty>().unwrap()); }
             } else {
-                let explicit = self.flags.contains(PropertyFlags::EXPLICIT_NOTIFY);
-                match (trait_name, explicit) {
-                    (Some(trait_name), true) => {
-                        let method_name = format_ident!("set_{}", self.name().to_snake_case());
+                let explicit = self.get.is_some() && self.flags.contains(PropertyFlags::EXPLICIT_NOTIFY);
+                match (trait_name, explicit, self.override_.is_some()) {
+                    (Some(trait_name), true, false) => {
+                        let method_name = self.setter_name();
                         let glib = quote! { #go::glib };
-                        Self::method_call(
+                        let call = Self::method_call(
                             &method_name,
                             quote! { value.get_owned().unwrap() },
                             trait_name,
                             &glib,
-                        )
+                        );
+                        quote! { #call; }
+                    }
+                    (_, true, true) => {
+                        let field = self.field_storage(None, go);
+                        quote! {
+                            if #go::ParamStoreWrite::set_value_checked(&#field, &value) {
+                                <<Self as #go::glib::subclass::types::ObjectSubclass>::Type as #go::glib::object::ObjectExt>::notify_by_pspec(
+                                    obj,
+                                    pspec
+                                );
+                            }
+                        }
                     }
                     _ => {
                         let field = self.field_storage(None, go);
-                        quote! { #go::ParamStoreWrite::set_value(&#field, &value) }
+                        quote! { #go::ParamStoreWrite::set_value(&#field, &value); }
                     }
                 }
             };
-            quote! { #index => { #set; } }
+            quote! { #index => { #set } }
         })
     }
     pub fn setter_prototype(&self, go: &syn::Ident) -> Option<TokenStream> {
+        if self.override_.is_some() {
+            return None;
+        }
         matches!(self.set, Some(None)).then(|| {
-            let method_name = format_ident!("set_{}", self.name().to_snake_case());
+            let method_name = self.setter_name();
             let ty = self.inner_type(go);
             quote! { fn #method_name(&self, value: #ty) }
         })
@@ -768,25 +828,28 @@ impl Property {
         properties_path: &TokenStream,
         go: &syn::Ident,
     ) -> Option<TokenStream> {
-        matches!(self.set, Some(None)).then(|| {
-            let proto = self.setter_prototype(go).expect("no setter proto");
-            let body =
-                if self.is_interface() || !self.flags.contains(PropertyFlags::EXPLICIT_NOTIFY) {
-                    let name = self.name();
-                    quote! {
-                        <Self as #go::glib::object::ObjectExt>::set_property(self, #name, value);
-                    }
-                } else {
+        self.setter_prototype(go).map(|proto| {
+            let explicit =
+                self.get.is_some() && self.flags.contains(PropertyFlags::EXPLICIT_NOTIFY);
+            let body = match (self.is_interface(), explicit) {
+                (false, true) => {
                     let field = self.field_storage(Some(object_type), go);
                     quote! {
-                        if #go::ParamStoreWrite::set(&#field, value) {
+                        if #go::ParamStoreWrite::set_checked(&#field, value) {
                             <Self as #go::glib::object::ObjectExt>::notify_by_pspec(
                                 self,
                                 &#properties_path()[#index]
                             );
                         }
                     }
-                };
+                }
+                _ => {
+                    let name = self.name();
+                    quote! {
+                        <Self as #go::glib::object::ObjectExt>::set_property(self, #name, value);
+                    }
+                }
+            };
             quote! {
                 #proto {
                     #body
@@ -794,58 +857,67 @@ impl Property {
             }
         })
     }
-    pub fn pspec_prototype(&self, glib: &TokenStream) -> TokenStream {
+    pub fn pspec_prototype(&self, glib: &TokenStream) -> Option<TokenStream> {
         let method_name = format_ident!("pspec_{}", self.name().to_snake_case());
-        quote! { fn #method_name() -> &'static #glib::ParamSpec }
+        Some(quote! { fn #method_name() -> &'static #glib::ParamSpec })
     }
     pub fn pspec_definition(
         &self,
         index: usize,
         properties_path: &TokenStream,
         glib: &TokenStream,
-    ) -> TokenStream {
-        let proto = self.pspec_prototype(glib);
-        quote! {
-            #proto { &#properties_path()[#index] }
-        }
+    ) -> Option<TokenStream> {
+        self.pspec_prototype(glib).map(|proto| {
+            quote! {
+                #proto { &#properties_path()[#index] }
+            }
+        })
     }
-    pub fn notify_prototype(&self) -> TokenStream {
+    pub fn notify_prototype(&self) -> Option<TokenStream> {
+        if self.override_.is_some() || self.no_notify.is_some() {
+            return None;
+        }
         let method_name = format_ident!("notify_{}", self.name().to_snake_case());
-        quote! { fn #method_name(&self) }
+        Some(quote! { fn #method_name(&self) })
     }
     pub fn notify_definition(
         &self,
         index: usize,
         properties_path: &TokenStream,
         glib: &TokenStream,
-    ) -> TokenStream {
-        let proto = self.notify_prototype();
-        quote! {
-            #proto {
-                <Self as #glib::object::ObjectExt>::notify_by_pspec(
-                    self,
-                    &#properties_path()[#index]
-                );
+    ) -> Option<TokenStream> {
+        self.notify_prototype().map(|proto| {
+            quote! {
+                #proto {
+                    <Self as #glib::object::ObjectExt>::notify_by_pspec(
+                        self,
+                        &#properties_path()[#index]
+                    );
+                }
             }
-        }
+        })
     }
-    pub fn connect_prototype(&self, glib: &TokenStream) -> TokenStream {
+    pub fn connect_prototype(&self, glib: &TokenStream) -> Option<TokenStream> {
+        if self.override_.is_some() || self.no_connect_notify.is_some() {
+            return None;
+        }
         let method_name = format_ident!("connect_{}_notify", self.name().to_snake_case());
-        quote! {
+        Some(quote! {
             fn #method_name<F: Fn(&Self) + 'static>(&self, f: F) -> #glib::SignalHandlerId
-        }
+        })
     }
-    pub fn connect_definition(&self, glib: &TokenStream) -> TokenStream {
-        let proto = self.connect_prototype(glib);
-        let name = self.name();
-        quote! {
-            #proto {
-                <Self as #glib::object::ObjectExt>::connect_notify_local(
-                    self,
-                    Some(#name),
-                    move |recv, _| f(recv),
-                )
+    pub fn connect_definition(&self, glib: &TokenStream) -> Option<TokenStream> {
+        self.connect_prototype(glib).map(|proto| {
+            let name = self.name();
+            quote! {
+                #proto {
+                    <Self as #glib::object::ObjectExt>::connect_notify_local(
+                        self,
+                        Some(#name),
+                        move |recv, _| f(recv),
+                    )
+                }
             }
-        }
+        })
     }
 }

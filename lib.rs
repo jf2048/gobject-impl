@@ -360,10 +360,15 @@ pub trait ParamStoreRead: ParamStore {
     }
 }
 pub trait ParamStoreWrite: ParamStore {
-    fn set(&self, value: Self::Type) -> bool;
-    fn set_value(&self, value: &Value) -> bool {
+    fn set(&self, value: Self::Type);
+    fn set_checked(&self, value: Self::Type) -> bool;
+    fn set_value(&self, value: &Value) {
         let v = value.get_owned().expect("Invalid value for property");
-        self.set(v)
+        self.set(v);
+    }
+    fn set_value_checked(&self, value: &Value) -> bool {
+        let v = value.get_owned().expect("Invalid value for property");
+        self.set_checked(v)
     }
 }
 
@@ -382,7 +387,10 @@ impl<T: ValueType + Copy + ParamSpecBuildable> ParamStoreRead for std::cell::Cel
     }
 }
 impl<T: ValueType + ParamSpecBuildable + PartialEq + Copy> ParamStoreWrite for std::cell::Cell<T> {
-    fn set(&self, value: T) -> bool {
+    fn set(&self, value: T) {
+        self.replace(value);
+    }
+    fn set_checked(&self, value: T) -> bool {
         let old = self.replace(value);
         old != self.get()
     }
@@ -403,7 +411,10 @@ impl<T: ValueType + ParamSpecBuildable + Clone> ParamStoreRead for std::cell::Re
     }
 }
 impl<T: ValueType + ParamSpecBuildable + PartialEq> ParamStoreWrite for std::cell::RefCell<T> {
-    fn set(&self, value: T) -> bool {
+    fn set(&self, value: T) {
+        self.replace(value);
+    }
+    fn set_checked(&self, value: T) -> bool {
         let old = self.replace(value);
         old != *self.borrow()
     }
@@ -424,7 +435,10 @@ impl<T: ValueType + ParamSpecBuildable + Clone> ParamStoreRead for std::sync::Mu
     }
 }
 impl<T: ValueType + ParamSpecBuildable + PartialEq> ParamStoreWrite for std::sync::Mutex<T> {
-    fn set(&self, value: T) -> bool {
+    fn set(&self, value: T) {
+        *self.lock().unwrap() = value;
+    }
+    fn set_checked(&self, value: T) -> bool {
         let mut storage = self.lock().unwrap();
         let old = std::mem::replace(storage.deref_mut(), value);
         old != *storage
@@ -446,7 +460,10 @@ impl<T: ValueType + ParamSpecBuildable + Clone> ParamStoreRead for std::sync::Rw
     }
 }
 impl<T: ValueType + ParamSpecBuildable + PartialEq> ParamStoreWrite for std::sync::RwLock<T> {
-    fn set(&self, value: T) -> bool {
+    fn set(&self, value: T) {
+        *self.write().unwrap() = value;
+    }
+    fn set_checked(&self, value: T) -> bool {
         let mut storage = self.write().unwrap();
         let old = std::mem::replace(storage.deref_mut(), value);
         old != *storage
