@@ -13,14 +13,9 @@ impl syn::parse::Parse for ObjectImplArgs {
 }
 
 pub fn object_impl(args: ObjectImplArgs, item: syn::ItemImpl) -> TokenStream {
-    let Args {
-        trait_,
-        pod,
-        ..
-    } = args.0;
+    let Args { trait_, pod, .. } = args.0;
 
-    let definition = ObjectDefinition::new(item, pod, false)
-        .unwrap_or_else(|e| abort!(e));
+    let definition = ObjectDefinition::new(item, pod, false).unwrap_or_else(|e| abort!(e));
 
     let ObjectDefinition {
         mut item,

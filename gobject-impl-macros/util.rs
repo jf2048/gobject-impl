@@ -49,7 +49,7 @@ pub fn has_method(items: &Vec<syn::ImplItem>, method: &str) -> (bool, syn::Ident
             format_ident!("inner_{}", method)
         } else {
             format_ident!("{}", method)
-        }
+        },
     )
 }
 
@@ -94,10 +94,7 @@ impl Args {
             } else if lookahead.peek(Token![trait]) {
                 let kw = input.parse::<Token![trait]>()?;
                 if trait_.is_some() {
-                    return Err(syn::Error::new_spanned(
-                        kw,
-                        "Duplicate `trait` attribute",
-                    ));
+                    return Err(syn::Error::new_spanned(kw, "Duplicate `trait` attribute"));
                 }
                 input.parse::<Token![=]>()?;
                 trait_.replace(input.parse()?);
@@ -114,13 +111,9 @@ impl Args {
                 input.parse::<Token![,]>()?;
             }
         }
-        let trait_ = trait_.ok_or_else(|| {
-            syn::Error::new(
-                input.span(),
-                "`trait` attribute required",
-            )
-        })?;
-        Ok(Args { type_, trait_, pod, })
+        let trait_ =
+            trait_.ok_or_else(|| syn::Error::new(input.span(), "`trait` attribute required"))?;
+        Ok(Args { type_, trait_, pod })
     }
 }
 
@@ -143,72 +136,65 @@ impl ObjectDefinition {
             if index >= item.items.len() {
                 break;
             }
-            let mut signal = false;
+            let mut signal_attr = None;
             let mut struct_def = false;
             {
                 let sub = &mut item.items[index];
                 match sub {
                     syn::ImplItem::Method(method) => {
-                        let signal_index = method
-                            .attrs
-                            .iter()
-                            .position(|attr| {
-                                attr.path.is_ident("signal") || attr.path.is_ident("accumulator")
-                            });
-                        let next = if let Some(signal_index) = signal_index {
-                            method.attrs.swap(signal_index, 0);
-                            signal = true;
-                            method.attrs.get(1)
-                        } else {
-                            method.attrs.get(0)
-                        };
-                        if let Some(next) = next {
+                        let signal_index = method.attrs.iter().position(|attr| {
+                            attr.path.is_ident("signal") || attr.path.is_ident("accumulator")
+                        });
+                        if let Some(signal_index) = signal_index {
+                            signal_attr.replace(method.attrs.remove(signal_index));
+                        }
+                        if let Some(next) = method.attrs.first() {
                             return Err(syn::Error::new_spanned(
                                 next,
                                 "Unknown attribute on signal",
                             ));
                         }
-                    },
+                    }
                     syn::ImplItem::Macro(mac) => {
                         let p = &mac.mac.path;
                         if p.is_ident("properties") {
                             if struct_item.is_some() {
                                 return Err(syn::Error::new_spanned(
                                     mac,
-                                    "Duplicate `properties` definition in trait impl"
+                                    "Duplicate `properties` definition in trait impl",
+                                ));
+                            }
+                            if !matches!(mac.mac.delimiter, syn::MacroDelimiter::Brace(_)) {
+                                return Err(syn::Error::new_spanned(
+                                    &mac.mac,
+                                    "`properties` macro must have braces",
                                 ));
                             }
                             struct_def = true;
                         }
-                    },
+                    }
                     _ => {}
                 }
             }
-            if signal {
+            if let Some(attr) = signal_attr {
                 let sub = item.items.remove(index);
                 let mut method = match sub {
                     syn::ImplItem::Method(method) => method,
                     _ => unreachable!(),
                 };
-                let attr = method.attrs.first().unwrap();
                 if attr.path.is_ident("signal") {
                     let signal = {
                         let ident = &method.sig.ident;
                         let signal_attrs = syn::parse2::<SignalAttrs>(attr.tokens.clone())?;
-                        let name = signal_attrs.name
+                        let name = signal_attrs
+                            .name
                             .clone()
                             .unwrap_or_else(|| ident.to_string().to_kebab_case());
                         if !is_valid_name(&name) {
                             if let Some(name) = &signal_attrs.name {
-                                return Err(syn::Error::new_spanned(
-                                    name,
-                                    format!("Invalid signal name '{}'. Signal names must start with an ASCII letter and only contain ASCII letters, numbers, '-' or '_'", name),
-                                ));
+                                return Err(syn::Error::new_spanned(name, format!("Invalid signal name '{}'. Signal names must start with an ASCII letter and only contain ASCII letters, numbers, '-' or '_'", name)));
                             } else {
-                                return Err(syn::Error::new_spanned(
-                                    &ident,
-                                    format!("Invalid signal name '{}'. Signal names must start with an ASCII letter and only contain ASCII letters, numbers, '-' or '_'", ident),
-                                ));
+                                return Err(syn::Error::new_spanned(&ident, format!("Invalid signal name '{}'. Signal names must start with an ASCII letter and only contain ASCII letters, numbers, '-' or '_'", ident)));
                             }
                         }
                         if signal_names.contains(&name) {
@@ -217,7 +203,8 @@ impl ObjectDefinition {
                                 format!("Duplicate definition for signal `{}`", name),
                             ));
                         }
-                        let signal = if let Some(i) = signals.iter().position(|s| s.ident == *ident) {
+                        let signal = if let Some(i) = signals.iter().position(|s| s.ident == *ident)
+                        {
                             &mut signals[i]
                         } else {
                             signals.push(Signal::new(ident.clone()));
@@ -237,7 +224,8 @@ impl ObjectDefinition {
                         signal.interface = is_interface;
                         signal
                     };
-                    method.sig.ident = format_ident!("{}_class_handler", &signal.name.to_snake_case());
+                    method.sig.ident =
+                        format_ident!("{}_class_handler", &signal.name.to_snake_case());
                     signal.handler = Some(method);
                 } else if attr.path.is_ident("accumulator") {
                     if !attr.tokens.is_empty() {
@@ -254,20 +242,15 @@ impl ObjectDefinition {
                     }
                     let signal = {
                         let ident = &method.sig.ident;
-                        let signal = if let Some(i) = signals.iter().position(|s| s.ident == *ident) {
+                        let signal = if let Some(i) = signals.iter().position(|s| s.ident == *ident)
+                        {
                             &mut signals[i]
                         } else {
                             signals.push(Signal::new(ident.clone()));
                             signals.last_mut().unwrap()
                         };
                         if signal.accumulator.is_some() {
-                            return Err(syn::Error::new_spanned(
-                                &ident,
-                                format!(
-                                    "Duplicate definition for accumulator on signal definition `{}`",
-                                    ident
-                                ),
-                            ));
+                            return Err(syn::Error::new_spanned(&ident, format!("Duplicate definition for accumulator on signal definition `{}`", ident)));
                         }
                         signal
                     };
@@ -339,7 +322,7 @@ impl Output {
         } else {
             let signals = signals
                 .iter()
-                .map(|signal| signal.create(object_type, &glib));
+                .map(|signal| signal.create(&item.self_ty, object_type, &glib));
             Some(quote! {
                 static SIGNALS: #glib::once_cell::sync::Lazy<::std::vec::Vec<#glib::subclass::Signal>> = #glib::once_cell::sync::Lazy::new(|| {
                     vec![
@@ -420,7 +403,12 @@ impl Output {
         }
 
         let ext_trait = trait_name.as_ref().map(|trait_name| {
-            let self_ty = &item.self_ty;
+            let self_ty = if let Some(object_type) = object_type {
+                quote! { #object_type }
+            } else {
+                let self_ty = &item.self_ty;
+                quote! { <#self_ty as #glib::subclass::types::ObjectSubclass>::Type }
+            };
             let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
             quote! {
                 pub trait #trait_name {

@@ -7,7 +7,7 @@ use std::sync::{Mutex, RwLock};
 macro_rules! wrapper {
     ($name:ident($priv:ident)) => {
         glib::wrapper! {
-            struct $name(ObjectSubclass<$priv>);
+            pub struct $name(ObjectSubclass<$priv>);
         }
         impl Default for $name {
             fn default() -> Self {
@@ -25,30 +25,28 @@ macro_rules! wrapper {
 #[test]
 fn props() {
     wrapper!(Empty(EmptyPrivate));
-    #[object_impl]
     #[derive(Default)]
-    struct EmptyPrivate {}
-    let _ = EmptyPrivate::default();
-
-    wrapper!(EmptyTrait(EmptyTraitPrivate));
-    #[object_impl(impl_trait)]
-    #[derive(Default)]
-    struct EmptyTraitPrivate {}
-    impl ObjectImpl for EmptyTraitPrivate {}
-    let _ = EmptyTrait::default();
+    pub struct EmptyPrivate {}
+    #[object_impl(trait = EmptyExt)]
+    impl ObjectImpl for EmptyPrivate {}
+    let _ = Empty::default();
 
     wrapper!(BasicProps(BasicPropsPrivate));
-    #[object_impl]
-    #[derive(Default)]
-    struct BasicPropsPrivate {
-        #[property(get, set)]
-        my_i32: Cell<i32>,
-        #[property(get, set)]
-        my_str: RefCell<String>,
-        #[property(get, set)]
-        my_mutex: Mutex<i32>,
-        #[property(get, set)]
-        my_rw_lock: RwLock<String>,
+    #[object_impl(trait = BasicPropsExt)]
+    impl ObjectImpl for BasicPropsPrivate {
+        properties! {
+            #[derive(Default)]
+            pub struct BasicPropsPrivate {
+                #[property(get, set)]
+                my_i32: Cell<i32>,
+                #[property(get, set)]
+                my_str: RefCell<String>,
+                #[property(get, set)]
+                my_mutex: Mutex<i32>,
+                #[property(get, set)]
+                my_rw_lock: RwLock<String>,
+            }
+        }
     }
 
     let props = BasicProps::default();

@@ -134,16 +134,19 @@ pub struct Property {
 }
 
 impl Property {
-    pub fn from_struct(item: &mut syn::ItemStruct, pod: bool, iface: bool) -> syn::Result<Vec<Self>> {
+    pub fn from_struct(
+        item: &mut syn::ItemStruct,
+        pod: bool,
+        iface: bool,
+    ) -> syn::Result<Vec<Self>> {
         let mut named = match &mut item.fields {
             syn::Fields::Named(fields) => fields,
-            f => return Err(syn::Error::new_spanned(
-                f,
-                "struct must have named fields",
-            ))
+            f => return Err(syn::Error::new_spanned(f, "struct must have named fields")),
         };
 
-        let mut fields = std::mem::take(&mut named.named).into_iter().collect::<Vec<_>>();
+        let mut fields = std::mem::take(&mut named.named)
+            .into_iter()
+            .collect::<Vec<_>>();
 
         let mut names = HashSet::new();
         let mut properties = vec![];
@@ -154,8 +157,7 @@ impl Property {
             }
             let mut remove = false;
             {
-                let field = fields[field_index].clone();
-                let prop = Self::parse(field, pod, iface)?;
+                let prop = Self::parse(&mut fields[field_index], pod, iface)?;
                 if !prop.skip {
                     if !matches!(prop.storage, PropertyStorage::Field(_)) {
                         remove = true;
@@ -204,7 +206,7 @@ impl Property {
             flag_spans: vec![],
         }
     }
-    fn parse(mut field: syn::Field, pod: bool, iface: bool) -> syn::Result<Self> {
+    fn parse(field: &mut syn::Field, pod: bool, iface: bool) -> syn::Result<Self> {
         let attr_pos = field.attrs.iter().position(|f| f.path.is_ident("property"));
         let prop = if let Some(pos) = attr_pos {
             let attr = field.attrs.remove(pos);
@@ -232,9 +234,11 @@ impl Property {
         let mut prop = Self::new(field, pod, iface);
         let mut first = true;
         prop.skip = false;
+
         if stream.is_empty() {
             return Ok(prop);
         }
+
         let input;
         syn::parenthesized!(input in stream);
         while !input.is_empty() {
@@ -301,7 +305,10 @@ impl Property {
                 } else if lookahead.peek(keywords::connect_notify) {
                     let kw = input.parse::<keywords::connect_notify>()?;
                     if !prop.connect_notify {
-                        return Err(syn::Error::new_spanned(kw, "Duplicate `connect_notify` attribute"));
+                        return Err(syn::Error::new_spanned(
+                            kw,
+                            "Duplicate `connect_notify` attribute",
+                        ));
                     }
                     prop.connect_notify = false;
                 } else {
@@ -331,11 +338,7 @@ impl Property {
             } else if lookahead.peek(keywords::minimum) {
                 let kw = input.parse::<keywords::minimum>()?;
                 let ident = format_ident!("minimum");
-                if prop
-                    .buildable_props
-                    .iter()
-                    .any(|(n, _)| *n == ident)
-                {
+                if prop.buildable_props.iter().any(|(n, _)| *n == ident) {
                     return Err(syn::Error::new_spanned(kw, "Duplicate `minimum` attribute"));
                 }
                 input.parse::<Token![=]>()?;
@@ -344,11 +347,7 @@ impl Property {
             } else if lookahead.peek(keywords::maximum) {
                 let kw = input.parse::<keywords::maximum>()?;
                 let ident = format_ident!("maximum");
-                if prop
-                    .buildable_props
-                    .iter()
-                    .any(|(n, _)| *n == ident)
-                {
+                if prop.buildable_props.iter().any(|(n, _)| *n == ident) {
                     return Err(syn::Error::new_spanned(kw, "Duplicate `maximum` attribute"));
                 }
                 input.parse::<Token![=]>()?;
@@ -357,11 +356,7 @@ impl Property {
             } else if lookahead.peek(keywords::default) {
                 let kw = input.parse::<keywords::default>()?;
                 let ident = format_ident!("default");
-                if prop
-                    .buildable_props
-                    .iter()
-                    .any(|(n, _)| *n == ident)
-                {
+                if prop.buildable_props.iter().any(|(n, _)| *n == ident) {
                     return Err(syn::Error::new_spanned(kw, "Duplicate `default` attribute"));
                 }
                 input.parse::<Token![=]>()?;
@@ -373,11 +368,7 @@ impl Property {
                 syn::parenthesized!(custom in input);
                 while custom.is_empty() {
                     let ident = custom.parse()?;
-                    if prop
-                        .buildable_props
-                        .iter()
-                        .any(|(n, _)| *n == ident)
-                    {
+                    if prop.buildable_props.iter().any(|(n, _)| *n == ident) {
                         return Err(syn::Error::new_spanned(
                             &ident,
                             format!("Duplicate `{}` attribute", ident),
@@ -517,10 +508,7 @@ impl Property {
         // validation
         let name = prop.name();
         if !is_valid_name(&name) {
-            return Err(syn::Error::new(
-                prop.name_span(),
-                format!("Invalid property name '{}'. Property names must start with an ASCII letter and only contain ASCII letters, numbers, '-' or '_'", name),
-            ));
+            return Err(syn::Error::new(prop.name_span(), format!("Invalid property name '{}'. Property names must start with an ASCII letter and only contain ASCII letters, numbers, '-' or '_'", name)));
         }
         if prop.override_.is_some() {
             if let Some(nick) = &prop.nick {
@@ -606,9 +594,9 @@ impl Property {
         let flags = self
             .flags
             .tokens(&glib, self.get.is_some(), self.set.is_some());
-        let ty = &self.ty;
+        let ty = self.inner_type(go);
         let static_type = quote! {
-            <<<#ty as #go::ParamStore>::Type as #glib::value::ValueType>::Type as #glib::StaticType>::static_type(),
+            <<#ty as #glib::value::ValueType>::Type as #glib::StaticType>::static_type(),
         };
         let props = self
             .buildable_props
@@ -655,7 +643,11 @@ impl Property {
     }
     fn inner_type(&self, go: &syn::Ident) -> TokenStream {
         let ty = &self.ty;
-        quote! { <#ty as #go::ParamStore>::Type }
+        if self.is_interface() {
+            quote! { #ty }
+        } else {
+            quote! { <#ty as #go::ParamStore>::Type }
+        }
     }
     fn is_interface(&self) -> bool {
         matches!(self.storage, PropertyStorage::Interface)
@@ -701,7 +693,7 @@ impl Property {
             } else if let Some(trait_name) = trait_name {
                 let method_name = format_ident!("{}", self.name().to_snake_case());
                 let call = Self::method_call(&method_name, quote! {}, trait_name, &glib);
-                    quote! { #glib::ToValue::to_value(&#call) }
+                quote! { #glib::ToValue::to_value(&#call) }
             } else {
                 let field = self.field_storage(None);
                 quote! { #go::ParamStoreRead::get_value(&#field) }

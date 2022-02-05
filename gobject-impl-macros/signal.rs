@@ -62,7 +62,7 @@ pub struct SignalAttrs {
 }
 
 impl Parse for SignalAttrs {
-    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+    fn parse(stream: syn::parse::ParseStream) -> syn::Result<Self> {
         let mut attrs = Self {
             flags: SignalFlags::empty(),
             emit: true,
@@ -70,6 +70,12 @@ impl Parse for SignalAttrs {
             name: None,
         };
 
+        if stream.is_empty() {
+            return Ok(attrs);
+        }
+
+        let input;
+        syn::parenthesized!(input in stream);
         while !input.is_empty() {
             let lookahead = input.lookahead1();
             if lookahead.peek(keywords::name) {
@@ -170,8 +176,7 @@ impl Signal {
         }
     }
     fn inputs(&self) -> impl Iterator<Item = &syn::FnArg> + Clone {
-        self
-            .handler
+        self.handler
             .as_ref()
             .map(|s| s.sig.inputs.iter())
             .unwrap_or_else(|| {
@@ -186,6 +191,7 @@ impl Signal {
     }
     fn args_unwrap<'a>(
         &'a self,
+        self_ty: Option<&'a syn::Type>,
         object_type: Option<&'a syn::Type>,
         imp: bool,
         glib: &'a TokenStream,
@@ -193,14 +199,19 @@ impl Signal {
         self.inputs().enumerate().map(move |(index, input)| {
             let ty = match input {
                 syn::FnArg::Receiver(_) => {
+                    let self_ty = if let Some(self_ty) = self_ty {
+                        quote! { #self_ty }
+                    } else {
+                        quote! { Self }
+                    };
                     if imp {
                         if let Some(ty) = object_type {
                             quote! { #ty }
                         } else {
-                            quote! { <Self as #glib::subclass::types::ObjectSubclass>::Type }
+                            quote! { <#self_ty as #glib::subclass::types::ObjectSubclass>::Type }
                         }
                     } else {
-                        quote! { Self }
+                        quote! { #self_ty }
                     }
                 }
                 syn::FnArg::Typed(t) => {
@@ -209,15 +220,27 @@ impl Signal {
                 }
             };
             let arg_name = format_ident!("arg{}", index);
+            let unwrap_recv = match input {
+                syn::FnArg::Receiver(_) => Some(quote! {
+                    let #arg_name = #glib::subclass::prelude::ObjectSubclassIsExt::imp(&#arg_name);
+                }),
+                _ => None,
+            };
             let err_msg = format!("Wrong type for argument {}: {{:?}}", index);
             quote! {
                 let #arg_name = args[#index].get::<#ty>().unwrap_or_else(|e| {
                     panic!(#err_msg, e)
                 });
+                #unwrap_recv
             }
         })
     }
-    pub fn create(&self, object_type: Option<&syn::Type>, glib: &TokenStream) -> TokenStream {
+    pub fn create(
+        &self,
+        self_ty: &syn::Type,
+        object_type: Option<&syn::Type>,
+        glib: &TokenStream,
+    ) -> TokenStream {
         let Self {
             name,
             flags,
@@ -228,19 +251,25 @@ impl Signal {
 
         let handler = handler.as_ref().unwrap();
         let inputs = self.inputs();
-        let input_static_types = inputs.map(|input| quote! {
-            <#glib::subclass::SignalType as ::core::convert::From<#glib::types::StaticType>>::from(
-                <#input as #glib::types::StaticType>::static_type()
-            )
+        let input_static_types = inputs.skip(1).map(|input| {
+            let ty = match &input {
+                syn::FnArg::Typed(t) => &t.ty,
+                _ => unimplemented!(),
+            };
+            quote! {
+                <#glib::subclass::SignalType as ::core::convert::From<#glib::Type>>::from(
+                    <#ty as #glib::types::StaticType>::static_type()
+                )
+            }
         });
         let arg_names = self.arg_names();
-        let args_unwrap = self.args_unwrap(object_type, true, glib);
+        let args_unwrap = self.args_unwrap(Some(self_ty), object_type, true, glib);
         let class_handler = (!handler.block.stmts.is_empty()).then(|| {
             let method_name = &handler.sig.ident;
             quote! {
                 let builder = builder.class_handler(|_, args| {
                     #(#args_unwrap)*
-                    let ret = Self::#method_name(#(#arg_names),*);
+                    let ret = #self_ty::#method_name(#(#arg_names),*);
                     #glib::closure::ToClosureReturnValue::to_closure_return_value(&ret)
                 });
             }
@@ -254,18 +283,25 @@ impl Signal {
                 });
             }
         });
-        let flags = flags.tokens(glib);
-        let output = &handler.sig.output;
+        let flags = (!flags.is_empty()).then(|| {
+            let flags = flags.tokens(glib);
+            quote! { let builder = builder.flags(#flags); }
+        });
+        let output = match &handler.sig.output {
+            o @ syn::ReturnType::Type(_, _) => quote! { #o },
+            _ => quote! { () },
+        };
         quote! {
             {
+                let param_types = [#(#input_static_types),*];
                 let builder = #glib::subclass::Signal::builder(
                     #name,
-                    &[#(#input_static_types),*],
-                    <#glib::subclass::SignalType as ::core::convert::From<#glib::types::StaticType>>::from(
+                    &param_types,
+                    <#glib::subclass::SignalType as ::core::convert::From<#glib::Type>>::from(
                         <#output as #glib::types::StaticType>::static_type()
-                    )
+                    ),
                 );
-                let builder = builder.flags(#flags);
+                #flags
                 #class_handler
                 #accumulator
                 builder.build()
@@ -283,27 +319,24 @@ impl Signal {
         }
     }
     fn emit_arg_defs(&self) -> impl Iterator<Item = syn::PatType> + Clone + '_ {
-        self.inputs()
-            .skip(1)
-            .enumerate()
-            .map(|(index, arg)| {
-                let mut ty = match arg {
-                    syn::FnArg::Typed(t) => t,
-                    _ => unimplemented!(),
-                }
-                .clone();
-                let pat_ident = Box::new(syn::Pat::Ident(syn::PatIdent {
-                    attrs: vec![],
-                    by_ref: None,
-                    mutability: None,
-                    ident: format_ident!("arg{}", index),
-                    subpat: None,
-                }));
-                if !matches!(&*ty.pat, syn::Pat::Ident(_)) {
-                    ty.pat = pat_ident;
-                }
-                ty
-            })
+        self.inputs().skip(1).enumerate().map(|(index, arg)| {
+            let mut ty = match arg {
+                syn::FnArg::Typed(t) => t,
+                _ => unimplemented!(),
+            }
+            .clone();
+            let pat_ident = Box::new(syn::Pat::Ident(syn::PatIdent {
+                attrs: vec![],
+                by_ref: None,
+                mutability: None,
+                ident: format_ident!("arg{}", index),
+                subpat: None,
+            }));
+            if !matches!(&*ty.pat, syn::Pat::Ident(_)) {
+                ty.pat = pat_ident;
+            }
+            ty
+        })
     }
     pub fn signal_prototype(&self, glib: &TokenStream) -> TokenStream {
         let method_name = format_ident!("signal_{}", self.name.to_snake_case());
@@ -344,6 +377,7 @@ impl Signal {
         glib: &TokenStream,
     ) -> TokenStream {
         let proto = self.emit_prototype(glib);
+        let handler = self.handler.as_ref().unwrap();
         let arg_defs = self.emit_arg_defs();
         let arg_names = arg_defs.clone().map(|arg| match &*arg.pat {
             syn::Pat::Ident(syn::PatIdent { ident, .. }) => ident.clone(),
@@ -354,18 +388,20 @@ impl Signal {
             let arg_names = arg_names.clone();
             quote! {
                 <Self as #glib::object::ObjectExt>::emit(
+                    self,
                     #signal_id,
-                    &[#(#arg_names),*]
+                    &[#(&#arg_names),*]
                 )
             }
         };
         let body = if self.flags.contains(SignalFlags::DETAILED) {
             quote! {
                 if let Some(signal_details) = signal_details {
-                    <Self as #glib::object::ObjectExt>::emit(
+                    <Self as #glib::object::ObjectExt>::emit_with_details(
+                        self,
                         #signal_id,
                         signal_details,
-                        &[#(#arg_names),*]
+                        &[#(&#arg_names),*]
                     )
                 } else {
                     #emit
@@ -374,11 +410,19 @@ impl Signal {
         } else {
             emit
         };
+        let unwrap = match &handler.sig.output {
+            syn::ReturnType::Type(_, _) => Some(quote! {
+                let ret = #glib::closure::TryFromClosureReturnValue::try_from_closure_return_value(
+                    ret
+                ).unwrap();
+            }),
+            _ => None,
+        };
         quote! {
             #proto {
-                #glib::closure::TryFromClosureReturnValue::try_from_closure_return_value(
-                    #body
-                ).unwrap()
+                let ret = #body;
+                #unwrap
+                ret
             }
         }
     }
@@ -409,8 +453,9 @@ impl Signal {
         glib: &TokenStream,
     ) -> TokenStream {
         let proto = self.connect_prototype(glib);
-        let arg_names = self.arg_names();
-        let args_unwrap = self.args_unwrap(None, false, glib);
+        let handler = self.handler.as_ref().unwrap();
+        let arg_names = self.arg_names().skip(1);
+        let args_unwrap = self.args_unwrap(None, None, false, glib).skip(1);
 
         let details = if self.flags.contains(SignalFlags::DETAILED) {
             quote! { details, }
@@ -418,6 +463,12 @@ impl Signal {
             quote! { ::std::option::Option::None }
         };
 
+        let unwrap = match &handler.sig.output {
+            syn::ReturnType::Type(_, _) => quote! {
+                #glib::closure::ToClosureReturnValue::to_closure_return_value(&ret)
+            },
+            _ => quote! { ::core::option::Option::None },
+        };
         quote! {
             #proto {
                 <Self as #glib::object::ObjectExt>::connect_local_id(
@@ -429,7 +480,7 @@ impl Signal {
                         let recv = args[0].get::<&Self>().unwrap();
                         #(#args_unwrap)*
                         let ret = f(recv, #(#arg_names),*);
-                        #glib::closure::ToClosureReturnValue::to_closure_return_value(&ret)
+                        #unwrap
                     },
                 )
             }

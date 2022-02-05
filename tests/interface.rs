@@ -1,4 +1,5 @@
 use glib::subclass::prelude::*;
+use gobject_impl::interface_impl;
 
 #[test]
 fn interface() {
@@ -9,11 +10,15 @@ fn interface() {
     pub struct DummyInterface {
         _parent: glib::gobject_ffi::GTypeInterface,
     }
-    #[gobject_impl::interface_impl(type = Dummy)]
+    #[interface_impl(type = Dummy, trait = DummyExt)]
     #[glib::object_interface]
     unsafe impl ObjectInterface for DummyInterface {
         const NAME: &'static str = "Dummy";
-        #[property(get, set)]
-        pub my_prop: std::cell::Cell<u64>,
+        properties! {
+            struct DummyInterface {
+                #[property(get, set)]
+                my_prop: u64,
+            }
+        }
     }
 }

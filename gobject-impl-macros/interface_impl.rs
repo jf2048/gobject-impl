@@ -13,18 +13,13 @@ impl syn::parse::Parse for InterfaceImplArgs {
 }
 
 pub fn interface_impl(args: InterfaceImplArgs, item: syn::ItemImpl) -> TokenStream {
-    let Args {
-        type_,
-        trait_,
-        pod,
-    } = args.0;
+    let Args { type_, trait_, pod } = args.0;
 
     let type_ = type_.unwrap_or_else(|| {
         abort_call_site!("`type` attribute required for `interface_impl`");
     });
 
-    let definition = ObjectDefinition::new(item, pod, true)
-        .unwrap_or_else(|e| abort!(e));
+    let definition = ObjectDefinition::new(item, pod, true).unwrap_or_else(|e| abort!(e));
 
     let ObjectDefinition {
         mut item,
