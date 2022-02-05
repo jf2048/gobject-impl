@@ -32,16 +32,16 @@ pub fn object_impl(args: ObjectImplArgs, item: syn::ItemImpl) -> TokenStream {
     let (has_set_property, set_property_ident) = has_method(&item.items, "set_property");
     let (has_property, property_ident) = has_method(&item.items, "property");
 
-    let subclass = quote! { <Self as #glib::object::ObjectSubclassIs>::Subclass };
+    let self_ty = &item.self_ty;
     let signals_path = if has_signals {
-        quote! { #subclass::#signals_ident }
+        quote! { #self_ty::#signals_ident }
     } else {
-        quote! { <#subclass as #glib::subclass::object::ObjectImpl>::#signals_ident }
+        quote! { <#self_ty as #glib::subclass::object::ObjectImpl>::#signals_ident }
     };
     let properties_path = if has_properties {
-        quote! { #subclass::#properties_ident }
+        quote! { #self_ty::#properties_ident }
     } else {
-        quote! { <#subclass as #glib::subclass::object::ObjectImpl>::#properties_ident }
+        quote! { <#self_ty as #glib::subclass::object::ObjectImpl>::#properties_ident }
     };
 
     let Output {
@@ -137,7 +137,6 @@ pub fn object_impl(args: ObjectImplArgs, item: syn::ItemImpl) -> TokenStream {
         }
     }
 
-    let self_ty = &item.self_ty;
     let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
 
     quote! {

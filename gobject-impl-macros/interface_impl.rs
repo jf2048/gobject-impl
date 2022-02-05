@@ -34,16 +34,16 @@ pub fn interface_impl(args: InterfaceImplArgs, item: syn::ItemImpl) -> TokenStre
     let (has_signals, signals_ident) = has_method(&item.items, "signals");
     let (has_properties, properties_ident) = has_method(&item.items, "properties");
 
-    let subclass = quote! { <Self as #glib::ObjectType>::GlibClassType };
+    let self_ty = &item.self_ty;
     let signals_path = if has_signals {
-        quote! { #subclass::#signals_ident }
+        quote! { #self_ty::#signals_ident }
     } else {
-        quote! { <#subclass as #glib::subclass::prelude::ObjectInterface>::#signals_ident }
+        quote! { <#self_ty as #glib::subclass::prelude::ObjectInterface>::#signals_ident }
     };
     let properties_path = if has_properties {
-        quote! { #subclass::#properties_ident }
+        quote! { #self_ty::#properties_ident }
     } else {
-        quote! { <#subclass as #glib::subclass::prelude::ObjectInterface>::#properties_ident }
+        quote! { <#self_ty as #glib::subclass::prelude::ObjectInterface>::#properties_ident }
     };
 
     let Output {
@@ -89,7 +89,6 @@ pub fn interface_impl(args: InterfaceImplArgs, item: syn::ItemImpl) -> TokenStre
         }
     }
 
-    let self_ty = &item.self_ty;
     let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
 
     quote! {

@@ -375,6 +375,12 @@ impl Output {
             })
         };
 
+        let self_ty = if let Some(object_type) = object_type {
+            quote! { #object_type }
+        } else {
+            let self_ty = &item.self_ty;
+            quote! { <#self_ty as #glib::subclass::types::ObjectSubclass>::Type }
+        };
         for (index, prop) in properties.iter().enumerate() {
             if prop.skip {
                 continue;
@@ -391,30 +397,34 @@ impl Output {
             }
             if let Some(getter) = prop.getter_prototype(go) {
                 prototypes.push(make_stmt(getter));
-                methods.push(prop.getter_definition(go).expect("no getter definition"));
+                methods.push(prop.getter_definition(&self_ty, go).expect("no getter definition"));
             }
             if let Some(setter) = prop.setter_prototype(go) {
                 prototypes.push(make_stmt(setter));
                 methods.push(
-                    prop.setter_definition(index, properties_path, go)
+                    prop.setter_definition(index, &self_ty, properties_path, go)
                         .expect("no setter definition"),
                 );
             }
         }
 
         let ext_trait = trait_name.as_ref().map(|trait_name| {
-            let self_ty = if let Some(object_type) = object_type {
-                quote! { #object_type }
-            } else {
-                let self_ty = &item.self_ty;
-                quote! { <#self_ty as #glib::subclass::types::ObjectSubclass>::Type }
-            };
-            let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
+            let type_var = format_ident!("____Object");
+            let mut generics = item.generics.clone();
+            {
+                let param = quote! { #type_var };
+                generics.params.push(syn::parse2(param).unwrap());
+                let where_clause = generics.make_where_clause();
+                let predicate = quote! { #type_var: #glib::IsA<#self_ty> };
+                where_clause.predicates.push(syn::parse2(predicate).unwrap());
+            }
+            let (impl_generics, _, where_clause) = generics.split_for_impl();
+            let (_, ty_generics, _) = item.generics.split_for_impl();
             quote! {
-                pub trait #trait_name {
+                pub trait #trait_name: 'static {
                     #(#prototypes)*
                 }
-                impl #impl_generics #trait_name for #self_ty #ty_generics #where_clause {
+                impl #impl_generics #trait_name for #type_var #ty_generics #where_clause {
                     #(#methods)*
                 }
             }

@@ -652,11 +652,15 @@ impl Property {
     fn is_interface(&self) -> bool {
         matches!(self.storage, PropertyStorage::Interface)
     }
-    fn field_storage(&self, go: Option<&syn::Ident>) -> TokenStream {
+    fn field_storage(&self, object_type: Option<&TokenStream>, go: &syn::Ident) -> TokenStream {
         match &self.storage {
             PropertyStorage::Field(field) => {
-                let recv = if let Some(go) = go {
-                    quote! { #go::glib::subclass::prelude::ObjectSubclassIsExt::imp(self) }
+                let recv = if let Some(object_type) = object_type {
+                    quote! {
+                        #go::glib::subclass::prelude::ObjectSubclassIsExt::imp(
+                            self.upcast_ref::<#object_type>()
+                        )
+                    }
                 } else {
                     quote! { self }
                 };
@@ -695,7 +699,7 @@ impl Property {
                 let call = Self::method_call(&method_name, quote! {}, trait_name, &glib);
                 quote! { #glib::ToValue::to_value(&#call) }
             } else {
-                let field = self.field_storage(None);
+                let field = self.field_storage(None, go);
                 quote! { #go::ParamStoreRead::get_value(&#field) }
             };
             quote! {
@@ -712,14 +716,14 @@ impl Property {
             quote! { fn #method_name(&self) -> #ty }
         })
     }
-    pub fn getter_definition(&self, go: &syn::Ident) -> Option<TokenStream> {
+    pub fn getter_definition(&self, object_type: &TokenStream, go: &syn::Ident) -> Option<TokenStream> {
         matches!(self.get, Some(None)).then(|| {
             let proto = self.getter_prototype(go).expect("no proto for getter");
             let body = if self.is_interface() {
                 let name = self.name();
                 quote! { <Self as #go::glib::object::ObjectExt>::property(self, #name) }
             } else {
-                let field = self.field_storage(Some(go));
+                let field = self.field_storage(Some(object_type), go);
                 let ty = self.inner_type(go);
                 quote! { #go::ParamStoreRead::get_value(&#field).get::<#ty>().unwrap() }
             };
@@ -748,7 +752,7 @@ impl Property {
                 let glib = quote! { #go::glib };
                 Self::method_call(&method_name, quote! { value }, trait_name.unwrap(), &glib)
             } else {
-                let field = self.field_storage(None);
+                let field = self.field_storage(None, go);
                 quote! { #go::ParamStoreWrite::set_value(&#field, &value) }
             };
             quote! { #index => { #set; } }
@@ -764,6 +768,7 @@ impl Property {
     pub fn setter_definition(
         &self,
         index: usize,
+        object_type: &TokenStream,
         properties_path: &TokenStream,
         go: &syn::Ident,
     ) -> Option<TokenStream> {
@@ -776,7 +781,7 @@ impl Property {
                         <Self as #go::glib::object::ObjectExt>::set_property(self, #name, value);
                     }
                 } else {
-                    let field = self.field_storage(Some(go));
+                    let field = self.field_storage(Some(object_type), go);
                     quote! {
                         if #go::ParamStoreWrite::set(&#field, &value) {
                             <Self as #go::glib::object::ObjectExt>::notify_by_pspec(
@@ -795,7 +800,7 @@ impl Property {
     }
     pub fn pspec_prototype(&self, glib: &TokenStream) -> TokenStream {
         let method_name = format_ident!("pspec_{}", self.name().to_snake_case());
-        quote! { fn #method_name(&self) -> &'static #glib::ParamSpec }
+        quote! { fn #method_name() -> &'static #glib::ParamSpec }
     }
     pub fn pspec_definition(
         &self,

@@ -344,7 +344,7 @@ impl Signal {
     pub fn signal_prototype(&self, glib: &TokenStream) -> TokenStream {
         let method_name = format_ident!("signal_{}", self.name.to_snake_case());
         quote! {
-            fn #method_name(&self) -> &'static #glib::subclass::Signal
+            fn #method_name() -> &'static #glib::subclass::Signal
         }
     }
     pub fn signal_definition(
@@ -480,9 +480,9 @@ impl Signal {
                     #details,
                     false,
                     move |args| {
-                        let recv = args[0].get::<&Self>().unwrap();
+                        let recv = args[0].get::<Self>().unwrap();
                         #(#args_unwrap)*
-                        let ret = f(recv, #(#arg_names),*);
+                        let ret = f(&recv, #(#arg_names),*);
                         #unwrap
                     },
                 )

@@ -20,5 +20,7 @@ fn interface() {
                 my_prop: u64,
             }
         }
+        #[signal]
+        fn my_sig(&self, hello: i32) {}
     }
 }
