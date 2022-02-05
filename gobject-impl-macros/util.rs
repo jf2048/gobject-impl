@@ -38,7 +38,7 @@ pub fn is_valid_name(name: &str) -> bool {
 }
 
 #[inline]
-pub fn has_method(items: &Vec<syn::ImplItem>, method: &str) -> (bool, syn::Ident) {
+pub fn has_method(items: &[syn::ImplItem], method: &str) -> (bool, syn::Ident) {
     let res = items.iter().any(|i| match i {
         syn::ImplItem::Method(m) => m.sig.ident == method,
         _ => false,
@@ -302,15 +302,19 @@ pub struct Output {
 
 impl Output {
     pub fn new(
-        item: &syn::ItemImpl,
-        signals: &[Signal],
-        properties: &[Property],
+        definition: &ObjectDefinition,
         object_type: Option<&syn::Type>,
         trait_name: Option<&syn::Ident>,
         signals_path: &TokenStream,
         properties_path: &TokenStream,
         go: &syn::Ident,
     ) -> Self {
+        let ObjectDefinition {
+            item,
+            signals,
+            properties,
+            ..
+        } = &definition;
         let glib = quote! { #go::glib };
 
         let mut private_impl_methods = vec![];
@@ -397,7 +401,10 @@ impl Output {
             }
             if let Some(getter) = prop.getter_prototype(go) {
                 prototypes.push(make_stmt(getter));
-                methods.push(prop.getter_definition(&self_ty, go).expect("no getter definition"));
+                methods.push(
+                    prop.getter_definition(&self_ty, go)
+                        .expect("no getter definition"),
+                );
             }
             if let Some(setter) = prop.setter_prototype(go) {
                 prototypes.push(make_stmt(setter));
@@ -416,7 +423,9 @@ impl Output {
                 generics.params.push(syn::parse2(param).unwrap());
                 let where_clause = generics.make_where_clause();
                 let predicate = quote! { #type_var: #glib::IsA<#self_ty> };
-                where_clause.predicates.push(syn::parse2(predicate).unwrap());
+                where_clause
+                    .predicates
+                    .push(syn::parse2(predicate).unwrap());
             }
             let (impl_generics, _, where_clause) = generics.split_for_impl();
             let (_, ty_generics, _) = item.generics.split_for_impl();

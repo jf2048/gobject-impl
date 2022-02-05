@@ -1,6 +1,6 @@
 use std::ops::DerefMut;
 
-use glib::{translate::*, value::ValueType, ParamFlags, ParamSpec, Value, ToValue};
+use glib::{translate::*, value::ValueType, ParamFlags, ParamSpec, ToValue, Value};
 
 pub use glib;
 pub use gobject_impl_macros::*;

@@ -211,11 +211,11 @@ impl Property {
         let prop = if let Some(pos) = attr_pos {
             let attr = field.attrs.remove(pos);
             syn::parse::Parser::parse2(
-                constrain(|item| Self::parse_attr(item, &field, pod, iface)),
+                constrain(|item| Self::parse_attr(item, field, pod, iface)),
                 attr.tokens,
             )?
         } else {
-            Self::new(&field, pod, iface)
+            Self::new(field, pod, iface)
         };
         Ok(prop)
     }
@@ -545,10 +545,12 @@ impl Property {
             }
             if let PropertyStorage::Virtual(_) = &prop.storage {
                 if matches!(prop.get, Some(None)) {
-                    prop.get.replace(Some(format_ident!("{}", prop.name().to_snake_case())));
+                    prop.get
+                        .replace(Some(format_ident!("{}", prop.name().to_snake_case())));
                 }
                 if matches!(prop.set, Some(None)) {
-                    prop.set.replace(Some(format_ident!("set_{}", prop.name().to_snake_case())));
+                    prop.set
+                        .replace(Some(format_ident!("set_{}", prop.name().to_snake_case())));
                 }
             }
         }
@@ -696,7 +698,11 @@ impl Property {
             quote! { fn #method_name(&self) -> #ty }
         })
     }
-    pub fn getter_definition(&self, object_type: &TokenStream, go: &syn::Ident) -> Option<TokenStream> {
+    pub fn getter_definition(
+        &self,
+        object_type: &TokenStream,
+        go: &syn::Ident,
+    ) -> Option<TokenStream> {
         matches!(self.get, Some(None)).then(|| {
             let proto = self.getter_prototype(go).expect("no proto for getter");
             let body = if self.is_interface() {
@@ -726,13 +732,24 @@ impl Property {
             let ty = self.inner_type(go);
             let set = if let Some(method) = &method {
                 quote! { obj.#method(value.get_owned::<#ty>().unwrap()); }
-            } else if trait_name.is_some() && self.flags.contains(PropertyFlags::EXPLICIT_NOTIFY) {
-                let method_name = format_ident!("set_{}", self.name().to_snake_case());
-                let glib = quote! { #go::glib };
-                Self::method_call(&method_name, quote! { value.get_owned().unwrap() }, trait_name.unwrap(), &glib)
             } else {
-                let field = self.field_storage(None, go);
-                quote! { #go::ParamStoreWrite::set_value(&#field, &value) }
+                let explicit = self.flags.contains(PropertyFlags::EXPLICIT_NOTIFY);
+                match (trait_name, explicit) {
+                    (Some(trait_name), true) => {
+                        let method_name = format_ident!("set_{}", self.name().to_snake_case());
+                        let glib = quote! { #go::glib };
+                        Self::method_call(
+                            &method_name,
+                            quote! { value.get_owned().unwrap() },
+                            trait_name,
+                            &glib,
+                        )
+                    }
+                    _ => {
+                        let field = self.field_storage(None, go);
+                        quote! { #go::ParamStoreWrite::set_value(&#field, &value) }
+                    }
+                }
             };
             quote! { #index => { #set; } }
         })

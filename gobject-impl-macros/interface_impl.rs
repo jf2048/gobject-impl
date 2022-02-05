@@ -19,31 +19,28 @@ pub fn interface_impl(args: InterfaceImplArgs, item: syn::ItemImpl) -> TokenStre
         abort_call_site!("`type` attribute required for `interface_impl`");
     });
 
-    let definition = ObjectDefinition::new(item, pod, true).unwrap_or_else(|e| abort!(e));
-
-    let ObjectDefinition {
-        mut item,
-        properties,
-        signals,
-        ..
-    } = definition;
+    let def = ObjectDefinition::new(item, pod, true).unwrap_or_else(|e| abort!(e));
 
     let go = go_crate_ident();
     let glib = quote! { #go::glib };
 
-    let (has_signals, signals_ident) = has_method(&item.items, "signals");
-    let (has_properties, properties_ident) = has_method(&item.items, "properties");
+    let (has_signals, signals_ident) = has_method(&def.item.items, "signals");
+    let (has_properties, properties_ident) = has_method(&def.item.items, "properties");
 
-    let self_ty = &item.self_ty;
-    let signals_path = if has_signals {
-        quote! { #self_ty::#signals_ident }
-    } else {
-        quote! { <#self_ty as #glib::subclass::prelude::ObjectInterface>::#signals_ident }
-    };
-    let properties_path = if has_properties {
-        quote! { #self_ty::#properties_ident }
-    } else {
-        quote! { <#self_ty as #glib::subclass::prelude::ObjectInterface>::#properties_ident }
+    let (signals_path, properties_path) = {
+        let self_ty = &def.item.self_ty;
+        (
+            if has_signals {
+                quote! { #self_ty::#signals_ident }
+            } else {
+                quote! { <#self_ty as #glib::subclass::prelude::ObjectInterface>::#signals_ident }
+            },
+            if has_properties {
+                quote! { #self_ty::#properties_ident }
+            } else {
+                quote! { <#self_ty as #glib::subclass::prelude::ObjectInterface>::#properties_ident }
+            },
+        )
     };
 
     let Output {
@@ -53,15 +50,15 @@ pub fn interface_impl(args: InterfaceImplArgs, item: syn::ItemImpl) -> TokenStre
         ext_trait,
         ..
     } = Output::new(
-        &item,
-        &signals,
-        &properties,
+        &def,
         Some(&type_),
         Some(&trait_),
         &signals_path,
         &properties_path,
         &go,
     );
+
+    let ObjectDefinition { mut item, .. } = def;
 
     if let Some(signal_defs) = &signal_defs {
         let signals_def = quote! {
@@ -89,6 +86,7 @@ pub fn interface_impl(args: InterfaceImplArgs, item: syn::ItemImpl) -> TokenStre
         }
     }
 
+    let self_ty = &item.self_ty;
     let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
 
     quote! {
