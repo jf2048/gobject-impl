@@ -1,8 +1,8 @@
 use heck::{ToKebabCase, ToSnakeCase};
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
 use std::collections::HashSet;
-use syn::{parse::Parse, Token};
+use syn::{parse::Parse, spanned::Spanned, Token};
 
 use super::util::*;
 
@@ -184,10 +184,7 @@ impl Signal {
                     signal_attr.replace(method.attrs.remove(signal_index));
                 }
                 if let Some(next) = method.attrs.first() {
-                    return Err(syn::Error::new_spanned(
-                        next,
-                        "Unknown attribute on signal",
-                    ));
+                    return Err(syn::Error::new_spanned(next, "Unknown attribute on signal"));
                 }
             }
             if let Some(attr) = signal_attr {
@@ -415,7 +412,7 @@ impl Signal {
             o @ syn::ReturnType::Type(_, _) => quote! { #o },
             _ => quote! { () },
         };
-        quote! {
+        quote_spanned! { handler.span() =>
             {
                 let param_types = [#(#input_static_types),*];
                 let builder = #glib::subclass::Signal::builder(
@@ -435,7 +432,7 @@ impl Signal {
     pub fn handler_definition(&self) -> Option<TokenStream> {
         let handler = self.handler.as_ref().unwrap();
         if !handler.block.stmts.is_empty() {
-            Some(quote! {
+            Some(quote_spanned! { handler.span() =>
                 #handler
             })
         } else {
@@ -464,7 +461,7 @@ impl Signal {
     }
     pub fn signal_prototype(&self, glib: &TokenStream) -> TokenStream {
         let method_name = format_ident!("signal_{}", self.name.to_snake_case());
-        quote! {
+        quote_spanned! { self.handler.as_ref().unwrap().span() =>
             fn #method_name() -> &'static #glib::subclass::Signal
         }
     }
@@ -475,9 +472,9 @@ impl Signal {
         glib: &TokenStream,
     ) -> TokenStream {
         let proto = self.signal_prototype(glib);
-        quote! {
-            #[inline]
+        quote_spanned! { self.handler.as_ref().unwrap().span() =>
             #proto {
+                #![inline]
                 &#signals_path()[#index]
             }
         }
@@ -491,7 +488,7 @@ impl Signal {
             .flags
             .contains(SignalFlags::DETAILED)
             .then(|| quote! { signal_details: ::std::option::Option<#glib::Quark>, });
-        quote! {
+        quote_spanned! { handler.span() =>
             fn #method_name(&self, #details_arg #(#arg_defs),*) #output
         }
     }
@@ -543,9 +540,9 @@ impl Signal {
             }),
             _ => None,
         };
-        quote! {
-            #[inline]
+        quote_spanned! { handler.span() =>
             #proto {
+                #![inline]
                 let ret = #body;
                 #unwrap
                 ret
@@ -564,7 +561,7 @@ impl Signal {
             .flags
             .contains(SignalFlags::DETAILED)
             .then(|| quote! { details: ::std::option::Option<#glib::Quark>, });
-        quote! {
+        quote_spanned! { handler.span() =>
             fn #method_name<F: Fn(&Self, #(#input_types),*) #output + 'static>(
                 &self,
                 #details_arg
@@ -591,13 +588,13 @@ impl Signal {
 
         let unwrap = match &handler.sig.output {
             syn::ReturnType::Type(_, _) => quote! {
-                #glib::closure::ToClosureReturnValue::to_closure_return_value(&ret)
+                #glib::closure::ToClosureReturnValue::to_closure_return_value(&_ret)
             },
             _ => quote! { ::core::option::Option::None },
         };
-        quote! {
-            #[inline]
+        quote_spanned! { handler.span() =>
             #proto {
+                #![inline]
                 <Self as #glib::object::ObjectExt>::connect_local_id(
                     self,
                     #signals_path()[#index].signal_id(),
@@ -606,7 +603,7 @@ impl Signal {
                     move |args| {
                         let recv = args[0].get::<Self>().unwrap();
                         #(#args_unwrap)*
-                        let ret = f(&recv, #(#arg_names),*);
+                        let _ret = f(&recv, #(#arg_names),*);
                         #unwrap
                     },
                 )

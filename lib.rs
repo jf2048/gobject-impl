@@ -127,7 +127,15 @@ define_numeric!(i64, glib::ParamSpecInt64, ParamSpecInt64Builder);
 define_numeric!(u64, glib::ParamSpecUInt64, ParamSpecUInt64Builder);
 define_numeric!(f32, glib::ParamSpecFloat, ParamSpecFloatBuilder);
 define_numeric!(f64, glib::ParamSpecDouble, ParamSpecDoubleBuilder);
-define_defaulted!(char, glib::ParamSpecUnichar, ParamSpecUnicharBuilder);
+// TODO
+//define_defaulted!(char, glib::ParamSpecUnichar, ParamSpecUnicharBuilder);
+
+impl<T: ParamSpecBuildable> ParamSpecBuildable for Option<T> {
+    type Builder = T::Builder;
+    fn builder() -> T::Builder {
+        T::builder()
+    }
+}
 
 impl<'a> ParamReadType<'a> for String {
     type ReadType = Self;
@@ -155,12 +163,6 @@ impl ParamSpecBuildable for String {
         ParamSpecStringBuilder { default: None }
     }
 }
-impl ParamSpecBuildable for Option<String> {
-    type Builder = ParamSpecStringBuilder;
-    fn builder() -> ParamSpecStringBuilder {
-        <String as ParamSpecBuildable>::builder()
-    }
-}
 
 pub struct ParamSpecParamBuilder {
     subtype: glib::Type,
@@ -171,12 +173,6 @@ impl ParamSpecParamBuilder {
         self
     }
     pub fn build(self, name: &str, nick: &str, blurb: &str, flags: ParamFlags) -> ParamSpec {
-        if self.subtype == glib::Type::UNIT {
-            panic!(
-                "property `{}` must specify a type implementing glib::ParamSpecType",
-                name
-            );
-        }
         glib::ParamSpecParam::new(name, nick, blurb, self.subtype, flags)
     }
 }
@@ -184,14 +180,8 @@ impl ParamSpecBuildable for ParamSpec {
     type Builder = ParamSpecParamBuilder;
     fn builder() -> ParamSpecParamBuilder {
         ParamSpecParamBuilder {
-            subtype: glib::Type::UNIT,
+            subtype: glib::Type::PARAM_SPEC,
         }
-    }
-}
-impl ParamSpecBuildable for Option<ParamSpec> {
-    type Builder = ParamSpecParamBuilder;
-    fn builder() -> ParamSpecParamBuilder {
-        <ParamSpec as ParamSpecBuildable>::builder()
     }
 }
 
@@ -201,18 +191,15 @@ impl ParamSpecPointerBuilder {
         glib::ParamSpecPointer::new(name, nick, blurb, flags)
     }
 }
-impl<T> ParamSpecBuildable for *mut T {
+/*
+ * TODO
+impl<T> ParamSpecBuildable for glib::types::Pointer {
     type Builder = ParamSpecPointerBuilder;
     fn builder() -> ParamSpecPointerBuilder {
         ParamSpecPointerBuilder {}
     }
 }
-impl<T> ParamSpecBuildable for *const T {
-    type Builder = ParamSpecPointerBuilder;
-    fn builder() -> ParamSpecPointerBuilder {
-        ParamSpecPointerBuilder {}
-    }
-}
+*/
 
 pub struct ParamSpecGTypeBuilder {
     subtype: glib::Type,
@@ -242,7 +229,7 @@ pub struct ParamSpecEnumBuilder {
 impl Default for ParamSpecEnumBuilder {
     fn default() -> Self {
         Self {
-            type_: glib::Type::UNIT,
+            type_: glib::Type::ENUM,
             default: 0,
         }
     }
@@ -268,7 +255,7 @@ pub struct ParamSpecFlagsBuilder {
 impl Default for ParamSpecFlagsBuilder {
     fn default() -> Self {
         Self {
-            type_: glib::Type::UNIT,
+            type_: glib::Type::FLAGS,
             default: 0,
         }
     }
@@ -293,7 +280,7 @@ pub struct ParamSpecBoxedBuilder {
 impl Default for ParamSpecBoxedBuilder {
     fn default() -> Self {
         Self {
-            type_: glib::Type::UNIT,
+            type_: glib::Type::BOXED,
         }
     }
 }
@@ -313,16 +300,11 @@ pub struct ParamSpecObjectBuilder {
 impl Default for ParamSpecObjectBuilder {
     fn default() -> Self {
         Self {
-            type_: glib::Type::UNIT,
+            type_: glib::Type::OBJECT,
         }
     }
 }
 impl ParamSpecObjectBuilder {
-    pub fn new() -> Self {
-        Self {
-            type_: glib::Type::UNIT,
-        }
-    }
     pub fn type_<T: glib::StaticType>(mut self) -> Self {
         self.type_ = T::static_type();
         self
@@ -375,12 +357,6 @@ impl ParamSpecBuildable for glib::Variant {
             variant: glib::VariantTy::ANY,
             default: None,
         }
-    }
-}
-impl ParamSpecBuildable for Option<glib::Variant> {
-    type Builder = ParamSpecVariantBuilder;
-    fn builder() -> ParamSpecVariantBuilder {
-        <glib::Variant as ParamSpecBuildable>::builder()
     }
 }
 
@@ -539,5 +515,79 @@ impl<T: ValueType + PartialEq> ParamStoreWriteChanged for std::sync::RwLock<T> {
         let mut storage = self.write().unwrap();
         let old = std::mem::replace(storage.deref_mut(), value);
         old != *storage
+    }
+}
+
+impl<T: ParamSpecBuildable> ParamSpecBuildable for glib::once_cell::unsync::OnceCell<T> {
+    type Builder = T::Builder;
+    fn builder() -> <Self as ParamSpecBuildable>::Builder {
+        T::builder()
+    }
+}
+impl<T: ValueType> ParamStore for glib::once_cell::unsync::OnceCell<T> {
+    type Type = T;
+}
+impl<T: ValueType + Clone> ParamStoreRead for glib::once_cell::unsync::OnceCell<T> {
+    fn get(&self) -> T {
+        self.get()
+            .unwrap_or_else(|| panic!("`get()` called on uninitialized OnceCell"))
+            .clone()
+    }
+}
+impl<'a, T: ValueType> ParamStoreReadRef<'a> for glib::once_cell::unsync::OnceCell<T> {
+    type Ref = &'a T;
+    fn get_ref(&'a self) -> Self::Ref {
+        self.get()
+            .unwrap_or_else(|| panic!("`get()` called on uninitialized OnceCell"))
+    }
+}
+impl<T: ValueType> ParamStoreWrite for glib::once_cell::unsync::OnceCell<T> {
+    fn set(&self, value: T) {
+        self.set(value)
+            .unwrap_or_else(|_| panic!("set() called on initialized OnceCell"));
+    }
+}
+impl<T: ValueType> ParamStoreWriteChanged for glib::once_cell::unsync::OnceCell<T> {
+    fn set_checked(&self, value: T) -> bool {
+        self.set(value)
+            .unwrap_or_else(|_| panic!("set() called on initialized OnceCell"));
+        true
+    }
+}
+
+impl<T: ParamSpecBuildable> ParamSpecBuildable for glib::once_cell::sync::OnceCell<T> {
+    type Builder = T::Builder;
+    fn builder() -> <Self as ParamSpecBuildable>::Builder {
+        T::builder()
+    }
+}
+impl<T: ValueType> ParamStore for glib::once_cell::sync::OnceCell<T> {
+    type Type = T;
+}
+impl<T: ValueType + Clone> ParamStoreRead for glib::once_cell::sync::OnceCell<T> {
+    fn get(&self) -> T {
+        self.get()
+            .unwrap_or_else(|| panic!("`get()` called on uninitialized OnceCell"))
+            .clone()
+    }
+}
+impl<'a, T: ValueType> ParamStoreReadRef<'a> for glib::once_cell::sync::OnceCell<T> {
+    type Ref = &'a T;
+    fn get_ref(&'a self) -> Self::Ref {
+        self.get()
+            .unwrap_or_else(|| panic!("`get()` called on uninitialized OnceCell"))
+    }
+}
+impl<T: ValueType> ParamStoreWrite for glib::once_cell::sync::OnceCell<T> {
+    fn set(&self, value: T) {
+        self.set(value)
+            .unwrap_or_else(|_| panic!("set() called on initialized OnceCell"));
+    }
+}
+impl<T: ValueType> ParamStoreWriteChanged for glib::once_cell::sync::OnceCell<T> {
+    fn set_checked(&self, value: T) -> bool {
+        self.set(value)
+            .unwrap_or_else(|_| panic!("set() called on initialized OnceCell"));
+        true
     }
 }

@@ -2,27 +2,16 @@ use glib::subclass::prelude::*;
 use gobject_impl::object_impl;
 use std::cell::RefCell;
 
-macro_rules! wrapper {
-    ($name:ident($priv:ident)) => {
-        glib::wrapper! {
-            pub struct $name(ObjectSubclass<$priv>);
-        }
-        impl Default for $name {
-            fn default() -> Self {
-                glib::Object::new(&[]).unwrap()
-            }
-        }
-        #[glib::object_subclass]
-        impl ObjectSubclass for $priv {
-            const NAME: &'static str = stringify!($name);
-            type Type = $name;
-        }
-    };
-}
-
 #[test]
-fn props() {
-    wrapper!(Signals(SignalsPrivate));
+fn signals() {
+    glib::wrapper! {
+        pub struct Signals(ObjectSubclass<SignalsPrivate>);
+    }
+    #[glib::object_subclass]
+    impl ObjectSubclass for SignalsPrivate {
+        const NAME: &'static str = "Signals";
+        type Type = Signals;
+    }
     #[derive(Default)]
     pub struct SignalsPrivate {
         log: RefCell<Vec<String>>,
@@ -45,7 +34,7 @@ fn props() {
             self.append(&(world + " last"));
         }
     }
-    let signals = Signals::default();
+    let signals = glib::Object::new::<Signals>(&[]).unwrap();
 
     signals.emit_noparam();
     signals.connect_noparam(|sig| {

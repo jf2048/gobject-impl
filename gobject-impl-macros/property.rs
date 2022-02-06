@@ -1,8 +1,8 @@
 use heck::{ToKebabCase, ToSnakeCase};
 use proc_macro2::{Span, TokenStream};
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned, ToTokens};
 use std::collections::HashSet;
-use syn::Token;
+use syn::{spanned::Spanned, Token};
 
 use super::util::*;
 
@@ -30,6 +30,8 @@ mod keywords {
     syn::custom_keyword!(boxed);
     syn::custom_keyword!(object);
     syn::custom_keyword!(storage);
+    syn::custom_keyword!(override_class);
+    syn::custom_keyword!(inherit);
 
     syn::custom_keyword!(construct);
     syn::custom_keyword!(construct_only);
@@ -151,12 +153,19 @@ impl PropertyPermission {
     }
 }
 
+pub enum PropertyOverride {
+    Interface(syn::Type),
+    Class(syn::Type),
+}
+
 pub struct Property {
+    pub span: Span,
     pub skip: bool,
     pub ty: syn::Type,
     pub special_type: PropertyType,
     pub storage: PropertyStorage,
-    pub override_: Option<syn::Type>,
+    pub override_: Option<PropertyOverride>,
+    pub no_override_inherit: Option<TokenStream>,
     pub get: PropertyPermission,
     pub set: PropertyPermission,
     pub no_notify: Option<syn::Ident>,
@@ -226,11 +235,13 @@ impl Property {
             PropertyStorage::Field(field.ident.clone().expect("no field ident"))
         };
         Self {
+            span: field.span(),
             skip: !pod,
             ty: field.ty.clone(),
             special_type: PropertyType::Unspecified,
             storage,
             override_: None,
+            no_override_inherit: None,
             get: PropertyPermission::default_for(false, pod),
             set: PropertyPermission::default_for(true, pod),
             no_notify: None,
@@ -246,18 +257,19 @@ impl Property {
     }
     fn parse(field: &mut syn::Field, pod: bool, iface: bool) -> syn::Result<Self> {
         let attr_pos = field.attrs.iter().position(|f| f.path.is_ident("property"));
-        let prop = if let Some(pos) = attr_pos {
+        let mut prop = if let Some(pos) = attr_pos {
             let attr = field.attrs.remove(pos);
             syn::parse::Parser::parse2(
-                constrain(|item| Self::parse_attr(item, field, pod, iface)),
+                constrain(|item| Self::parse_from_attr(item, field, pod, iface)),
                 attr.tokens,
             )?
         } else {
             Self::new(field, pod, iface)
         };
+        prop.validate(field)?;
         Ok(prop)
     }
-    fn parse_attr(
+    fn parse_from_attr(
         stream: syn::parse::ParseStream,
         field: &syn::Field,
         pod: bool,
@@ -352,6 +364,15 @@ impl Property {
                         ));
                     }
                     prop.no_connect_notify.replace(kw);
+                } else if lookahead.peek(keywords::inherit) {
+                    let kw = input.parse::<keywords::inherit>()?;
+                    if prop.no_override_inherit.is_some() {
+                        return Err(syn::Error::new_spanned(
+                            kw,
+                            "Duplicate `inherited` attribute",
+                        ));
+                    }
+                    prop.no_override_inherit.replace(kw.to_token_stream());
                 } else {
                     return Err(lookahead.error());
                 }
@@ -466,16 +487,21 @@ impl Property {
                 input.parse::<Token![=]>()?;
                 let s = input.parse::<syn::LitStr>()?;
                 prop.buildable_props.push((ident, syn::Lit::Str(s)));
-            } else if !iface && lookahead.peek(Token![override]) {
-                let kw = input.parse::<Token![override]>()?;
+            } else if lookahead.peek(Token![override]) || lookahead.peek(keywords::override_class) {
+                let ident: syn::Ident = input.call(syn::ext::IdentExt::parse_any)?;
                 if prop.override_.is_some() {
                     return Err(syn::Error::new_spanned(
-                        kw,
-                        "Duplicate `override` attribute",
+                        ident,
+                        "Only one of `override`, `override_class` is allowed",
                     ));
                 }
                 input.parse::<Token![=]>()?;
-                prop.override_.replace(input.parse()?);
+                let target = input.parse()?;
+                if ident == "override" {
+                    prop.override_.replace(PropertyOverride::Interface(target));
+                } else {
+                    prop.override_.replace(PropertyOverride::Class(target));
+                }
             } else if !iface && lookahead.peek(Token![virtual]) {
                 let kw = input.parse::<Token![virtual]>()?;
                 if !matches!(prop.storage, PropertyStorage::Field(_)) {
@@ -518,48 +544,50 @@ impl Property {
             }
         }
 
-        // validation
-        if !prop.skip {
-            let name = prop.name();
+        Ok(prop)
+    }
+    fn validate(&mut self, field: &syn::Field) -> syn::Result<()> {
+        if !self.skip {
+            let name = self.name();
             if !is_valid_name(&name) {
-                return Err(syn::Error::new(prop.name_span(), format!("Invalid property name '{}'. Property names must start with an ASCII letter and only contain ASCII letters, numbers, '-' or '_'", name)));
+                return Err(syn::Error::new(self.name_span(), format!("Invalid property name '{}'. Property names must start with an ASCII letter and only contain ASCII letters, numbers, '-' or '_'", name)));
             }
-            if !prop.get.is_allowed() && !prop.set.is_allowed() {
+            if !self.get.is_allowed() && !self.set.is_allowed() {
                 return Err(syn::Error::new_spanned(
-                    field.ident.as_ref().expect("no field ident"),
+                    field,
                     "Property must have at least one of `get` and `set`",
                 ));
             }
-            if let PropertyPermission::AllowCustom(method) = &prop.get {
-                if method == &prop.getter_name() {
+            if let PropertyPermission::AllowCustom(method) = &self.get {
+                if method == &self.getter_name() {
                     return Err(syn::Error::new_spanned(
                         method,
                         "custom getter name conflicts with trait method",
                     ));
                 }
             }
-            if let PropertyPermission::AllowCustom(method) = &prop.set {
-                if method == &prop.setter_name() {
+            if let PropertyPermission::AllowCustom(method) = &self.set {
+                if method == &self.setter_name() {
                     return Err(syn::Error::new_spanned(
                         method,
                         "custom setter name conflicts with trait method",
                     ));
                 }
             }
-            if prop.override_.is_some() {
-                if let Some(nick) = &prop.nick {
+            if self.override_.is_some() {
+                if let Some(nick) = &self.nick {
                     return Err(syn::Error::new_spanned(
                         nick,
                         "`nick` not allowed on override property",
                     ));
                 }
-                if let Some(blurb) = &prop.blurb {
+                if let Some(blurb) = &self.blurb {
                     return Err(syn::Error::new_spanned(
                         blurb,
                         "`blurb` not allowed on override property",
                     ));
                 }
-                for (ident, _) in &prop.buildable_props {
+                for (ident, _) in &self.buildable_props {
                     if ident != "minimum" && ident != "maximum" {
                         return Err(syn::Error::new_spanned(
                             ident,
@@ -567,33 +595,44 @@ impl Property {
                         ));
                     }
                 }
-                if let Some(flag) = prop.flag_idents.first() {
+                if let Some(flag) = self.flag_idents.first() {
                     return Err(syn::Error::new_spanned(
                         &flag,
                         format!("`{}` not allowed on override property", flag),
                     ));
                 }
-                if let Some(ident) = prop.special_type.ident() {
+                if let Some(ident) = self.special_type.ident() {
                     return Err(syn::Error::new_spanned(
                         ident,
                         "type specifier not allowed on override property",
                     ));
                 }
-                if let Some(notify) = &prop.no_notify {
-                    return Err(syn::Error::new_spanned(
-                        notify,
-                        "`notify` not allowed on override property",
-                    ));
+                if let Some(PropertyOverride::Class(target)) = &self.override_ {
+                    if let Some(token) = &self.no_override_inherit {
+                        return Err(syn::Error::new_spanned(
+                            token,
+                            "`!inherit` unnecessary when using `override_class`",
+                        ));
+                    }
+                    self.no_override_inherit.replace(target.to_token_stream());
                 }
-                if let Some(connect_notify) = &prop.no_connect_notify {
-                    return Err(syn::Error::new_spanned(
-                        connect_notify,
-                        "`connect_notify` not allowed on override property",
-                    ));
+                if self.no_override_inherit.is_none() {
+                    if let Some(notify) = &self.no_notify {
+                        return Err(syn::Error::new_spanned(
+                            notify,
+                            "`notify` not allowed on inherited override property",
+                        ));
+                    }
+                    if let Some(connect_notify) = &self.no_connect_notify {
+                        return Err(syn::Error::new_spanned(
+                            connect_notify,
+                            "`connect_notify` not allowed on inherited override property",
+                        ));
+                    }
                 }
             }
-            if matches!(prop.set, PropertyPermission::AllowAuto) {
-                for flag in &prop.flag_idents {
+            if matches!(self.set, PropertyPermission::AllowAuto) {
+                for flag in &self.flag_idents {
                     if flag == "explicit_notify" || flag == "lax_validation" {
                         return Err(syn::Error::new_spanned(
                             &flag,
@@ -601,34 +640,39 @@ impl Property {
                         ));
                     }
                 }
-                prop.flags |= PropertyFlags::EXPLICIT_NOTIFY | PropertyFlags::LAX_VALIDATION;
+                self.flags |= PropertyFlags::EXPLICIT_NOTIFY | PropertyFlags::LAX_VALIDATION;
             }
-            if matches!(prop.storage, PropertyStorage::Virtual(_)) {
-                if matches!(prop.get, PropertyPermission::Allow) {
-                    prop.get = PropertyPermission::AllowCustomDefault;
+            if matches!(self.storage, PropertyStorage::Virtual(_)) {
+                if matches!(self.get, PropertyPermission::Allow) {
+                    self.get = PropertyPermission::AllowCustomDefault;
                 }
-                if matches!(prop.set, PropertyPermission::Allow) {
-                    prop.set = PropertyPermission::AllowCustomDefault;
+                if matches!(self.set, PropertyPermission::Allow) {
+                    self.set = PropertyPermission::AllowCustomDefault;
                 }
             }
-            if matches!(prop.get, PropertyPermission::AllowCustomDefault) {
-                let ident = format_ident!("_{}", prop.name().to_snake_case());
-                prop.get = PropertyPermission::AllowCustom(ident);
+            if matches!(self.get, PropertyPermission::AllowCustomDefault) {
+                let ident = format_ident!("_{}", self.name().to_snake_case());
+                self.get = PropertyPermission::AllowCustom(ident);
             }
-            if matches!(prop.set, PropertyPermission::AllowCustomDefault) {
-                let ident = format_ident!("_set_{}", prop.name().to_snake_case());
-                prop.set = PropertyPermission::AllowCustom(ident);
+            if matches!(self.set, PropertyPermission::AllowCustomDefault) {
+                let ident = format_ident!("_set_{}", self.name().to_snake_case());
+                self.set = PropertyPermission::AllowCustom(ident);
             }
         }
 
-        Ok(prop)
+        Ok(())
     }
     pub fn create(&self, go: &syn::Ident) -> TokenStream {
         let glib = quote! { #go::glib };
         let name = self.name();
-        if let Some(iface) = &self.override_ {
-            return quote! {
-                #glib::ParamSpecOverride::for_interface::<#iface>(#name)
+        if let Some(override_) = &self.override_ {
+            return match override_ {
+                PropertyOverride::Interface(target) => quote! {
+                    #glib::ParamSpecOverride::for_interface::<#target>(#name)
+                },
+                PropertyOverride::Class(target) => quote! {
+                    #glib::ParamSpecOverride::for_class::<#target>(#name)
+                },
             };
         }
         let nick = self
@@ -675,7 +719,7 @@ impl Property {
                 .subtype::<<#subtype as #glib::value::ValueType>::Type>()
             }
         });
-        quote! {
+        quote_spanned! { self.span =>
             #builder
             #type_prop
             #subtype_prop
@@ -710,7 +754,7 @@ impl Property {
         let recv = if let Some(object_type) = object_type {
             quote! {
                 #go::glib::subclass::prelude::ObjectSubclassIsExt::imp(
-                    self.upcast_ref::<#object_type>()
+                    #go::glib::Cast::upcast_ref::<#object_type>(self)
                 )
             }
         } else {
@@ -727,6 +771,9 @@ impl Property {
             .iter()
             .find_map(|(i, l)| (i == name).then(|| l))
     }
+    fn is_inherited(&self) -> bool {
+        self.override_.is_some() && self.no_override_inherit.is_none()
+    }
     #[inline]
     fn getter_name(&self) -> syn::Ident {
         format_ident!("{}", self.name().to_snake_case())
@@ -742,7 +789,7 @@ impl Property {
         }
         self.get.is_allowed().then(|| {
             let glib = quote! { #go::glib };
-            let body = if self.override_.is_none() {
+            let body = if !self.is_inherited() {
                 let method_name = self.getter_name();
                 let recv_ty = match inheritance {
                     ClassInheritance::Abstract(trait_name) => quote! {
@@ -761,7 +808,7 @@ impl Property {
                 let field = self.field_storage(None, go);
                 quote! { #go::ParamStoreRead::get_value(&#field) }
             };
-            quote! {
+            quote_spanned! { self.span =>
                 #index => {
                     #body
                 }
@@ -769,13 +816,13 @@ impl Property {
         })
     }
     pub fn getter_prototype(&self, go: &syn::Ident) -> Option<TokenStream> {
-        if self.override_.is_some() {
+        if self.is_inherited() {
             return None;
         }
         self.get.is_allowed().then(|| {
             let method_name = self.getter_name();
             let ty = self.inner_type(go);
-            quote! { fn #method_name(&self) -> #ty }
+            quote_spanned! { self.span => fn #method_name(&self) -> #ty }
         })
     }
     pub fn getter_definition(
@@ -785,7 +832,7 @@ impl Property {
     ) -> Option<TokenStream> {
         self.getter_prototype(go).map(|proto| {
             let body = if let PropertyPermission::AllowCustom(method) = &self.get {
-                quote! { self.upcast_ref::<#object_type>().#method() }
+                quote! { #go::glib::Cast::upcast_ref::<#object_type>(self).#method() }
             } else if self.is_object() {
                 let field = self.field_storage(Some(object_type), go);
                 quote! { #go::ParamStoreRead::get(&#field) }
@@ -793,9 +840,9 @@ impl Property {
                 let name = self.name();
                 quote! { <Self as #go::glib::object::ObjectExt>::property(self, #name) }
             };
-            quote! {
-                #[inline]
+            quote_spanned! { self.span =>
                 #proto {
+                    #![inline]
                     #body
                 }
             }
@@ -838,8 +885,8 @@ impl Property {
             let glib = quote! { #go::glib };
             let can_inline = self.can_inline_set();
             let construct_only = self.flags.contains(PropertyFlags::CONSTRUCT_ONLY);
-            let is_override = self.override_.is_some();
-            let body = match (can_inline, construct_only, is_override) {
+            let is_inherited = self.is_inherited();
+            let body = match (can_inline, construct_only, is_inherited) {
                 (true, false, false) => {
                     let method_name = self.setter_name();
                     let recv_ty = match inheritance {
@@ -891,17 +938,17 @@ impl Property {
                     }
                 }
             };
-            quote! { #index => { #body } }
+            quote_spanned! { self.span => #index => { #body } }
         })
     }
     pub fn setter_prototype(&self, go: &syn::Ident) -> Option<TokenStream> {
-        if self.override_.is_some() || self.flags.contains(PropertyFlags::CONSTRUCT_ONLY) {
+        if self.is_inherited() || self.flags.contains(PropertyFlags::CONSTRUCT_ONLY) {
             return None;
         }
         self.set.is_allowed().then(|| {
             let method_name = self.setter_name();
             let ty = self.inner_type(go);
-            quote! { fn #method_name(&self, value: #ty) }
+            quote_spanned! { self.span => fn #method_name(&self, value: #ty) }
         })
     }
     pub fn setter_definition(
@@ -915,7 +962,7 @@ impl Property {
             let body = match (self.is_object(), self.can_inline_set()) {
                 (true, true) => match &self.set {
                     PropertyPermission::AllowCustom(method) => quote! {
-                        self.upcast_ref::<#object_type>().#method(value);
+                        #go::glib::Cast::upcast_ref::<#object_type>(self).#method(value);
                     },
                     PropertyPermission::AllowAuto => {
                         let field = self.field_storage(Some(object_type), go);
@@ -954,9 +1001,9 @@ impl Property {
                     }
                 }
             };
-            quote! {
-                #[inline]
+            quote_spanned! { self.span =>
                 #proto {
+                    #![inline]
                     #body
                 }
             }
@@ -964,7 +1011,7 @@ impl Property {
     }
     pub fn pspec_prototype(&self, glib: &TokenStream) -> Option<TokenStream> {
         let method_name = format_ident!("pspec_{}", self.name().to_snake_case());
-        Some(quote! { fn #method_name() -> &'static #glib::ParamSpec })
+        Some(quote_spanned! { self.span => fn #method_name() -> &'static #glib::ParamSpec })
     }
     pub fn pspec_definition(
         &self,
@@ -973,18 +1020,20 @@ impl Property {
         glib: &TokenStream,
     ) -> Option<TokenStream> {
         self.pspec_prototype(glib).map(|proto| {
-            quote! {
-                #[inline]
-                #proto { &#properties_path()[#index] }
+            quote_spanned! { self.span =>
+                #proto {
+                    #![inline]
+                    &#properties_path()[#index]
+                }
             }
         })
     }
     pub fn notify_prototype(&self) -> Option<TokenStream> {
-        if self.override_.is_some() || self.no_notify.is_some() {
+        if self.is_inherited() || self.no_notify.is_some() || !self.get.is_allowed() {
             return None;
         }
         let method_name = format_ident!("notify_{}", self.name().to_snake_case());
-        Some(quote! { fn #method_name(&self) })
+        Some(quote_spanned! { self.span => fn #method_name(&self) })
     }
     pub fn notify_definition(
         &self,
@@ -993,9 +1042,9 @@ impl Property {
         glib: &TokenStream,
     ) -> Option<TokenStream> {
         self.notify_prototype().map(|proto| {
-            quote! {
-                #[inline]
+            quote_spanned! { self.span =>
                 #proto {
+                    #![inline]
                     <Self as #glib::object::ObjectExt>::notify_by_pspec(
                         self,
                         &#properties_path()[#index]
@@ -1005,20 +1054,20 @@ impl Property {
         })
     }
     pub fn connect_prototype(&self, glib: &TokenStream) -> Option<TokenStream> {
-        if self.override_.is_some() || self.no_connect_notify.is_some() {
+        if self.is_inherited() || self.no_connect_notify.is_some() {
             return None;
         }
         let method_name = format_ident!("connect_{}_notify", self.name().to_snake_case());
-        Some(quote! {
+        Some(quote_spanned! { self.span =>
             fn #method_name<F: Fn(&Self) + 'static>(&self, f: F) -> #glib::SignalHandlerId
         })
     }
     pub fn connect_definition(&self, glib: &TokenStream) -> Option<TokenStream> {
         self.connect_prototype(glib).map(|proto| {
             let name = self.name();
-            quote! {
-                #[inline]
+            quote_spanned! { self.span =>
                 #proto {
+                    #![inline]
                     <Self as #glib::object::ObjectExt>::connect_notify_local(
                         self,
                         Some(#name),

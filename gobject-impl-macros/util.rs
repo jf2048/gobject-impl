@@ -364,7 +364,7 @@ impl Output {
                 let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
                 quote! {
                     impl #impl_generics #object_type #ty_generics #where_clause {
-                        #(#methods)*
+                        #(pub #methods)*
                     }
                 }
             }
