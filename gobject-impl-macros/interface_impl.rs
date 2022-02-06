@@ -1,5 +1,4 @@
 use proc_macro2::TokenStream;
-use proc_macro_error::{abort, abort_call_site};
 use quote::quote;
 
 use super::util::*;
@@ -12,14 +11,16 @@ impl syn::parse::Parse for InterfaceImplArgs {
     }
 }
 
-pub fn interface_impl(args: InterfaceImplArgs, item: syn::ItemImpl) -> TokenStream {
-    let Args { type_, trait_, pod } = args.0;
+pub fn interface_impl(args: InterfaceImplArgs, item: syn::ItemImpl) -> syn::Result<TokenStream> {
+    let Args {
+        type_,
+        inheritance,
+        pod,
+    } = args.0;
 
-    let type_ = type_.unwrap_or_else(|| {
-        abort_call_site!("`type` attribute required for `interface_impl`");
-    });
+    let type_ = type_.expect("no type");
 
-    let def = ObjectDefinition::new(item, pod, true).unwrap_or_else(|e| abort!(e));
+    let def = ObjectDefinition::new(item, pod, true)?;
 
     let go = go_crate_ident();
     let glib = quote! { #go::glib };
@@ -47,12 +48,12 @@ pub fn interface_impl(args: InterfaceImplArgs, item: syn::ItemImpl) -> TokenStre
         mut private_impl_methods,
         prop_defs,
         signal_defs,
-        ext_trait,
+        public_methods,
         ..
     } = Output::new(
         &def,
         Some(&type_),
-        Some(&trait_),
+        &inheritance,
         &signals_path,
         &properties_path,
         &go,
@@ -89,11 +90,11 @@ pub fn interface_impl(args: InterfaceImplArgs, item: syn::ItemImpl) -> TokenStre
     let self_ty = &item.self_ty;
     let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
 
-    quote! {
+    Ok(quote! {
         #item
         impl #impl_generics #self_ty #ty_generics #where_clause {
             #(#private_impl_methods)*
         }
-        #ext_trait
-    }
+        #public_methods
+    })
 }

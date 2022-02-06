@@ -43,6 +43,12 @@ fn props() {
                 my_mutex: Mutex<i32>,
                 #[property(get, set)]
                 my_rw_lock: RwLock<String>,
+                #[property(get, set, construct,
+                           name = "my-u8", nick = "My U8", blurb = "A uint8",
+                           minimum = 5, maximum = 20, default = 19)]
+                my_attributed: Cell<u8>,
+                #[property(get, set, construct_only, default = 100.0)]
+                my_construct_only: Cell<f64>,
                 #[property(get, set, explicit_notify)]
                 my_explicit: Cell<u64>,
                 #[property(get = _, set = _, explicit_notify)]
@@ -51,7 +57,7 @@ fn props() {
                 my_computed_prop: i32,
                 #[property(get, set, storage = inner.my_bool)]
                 my_delegate: Cell<bool>,
-                #[property(get, set, !notify, !connect_notify)]
+                #[property(get, set, !notify_func, !connect_notify_func)]
                 my_no_defaults: Cell<u64>,
 
                 inner: BasicPropsInner
@@ -64,26 +70,26 @@ fn props() {
     }
 
     impl BasicProps {
-        pub fn my_custom_accessors(&self) -> String {
+        fn _my_custom_accessors(&self) -> String {
             self.imp().my_custom_accessors.borrow().clone()
         }
-        pub fn set_my_custom_accessors(&self, value: String) {
+        fn _set_my_custom_accessors(&self, value: String) {
             let old = self.imp().my_custom_accessors.replace(value);
             if old != *self.imp().my_custom_accessors.borrow() {
                 self.notify_my_custom_accessors();
             }
         }
-        pub fn my_computed_prop(&self) -> i32 {
+        fn _my_computed_prop(&self) -> i32 {
             self.my_i32() + 7
         }
-        pub fn set_my_computed_prop(&self, value: i32) {
+        fn _set_my_computed_prop(&self, value: i32) {
             self.set_my_i32(value - 7);
         }
     }
 
     let props = BasicProps::default();
-    assert_eq!(BasicPropsPrivate::properties().len(), 9);
-    assert_eq!(props.list_properties().len(), 9);
+    assert_eq!(BasicPropsPrivate::properties().len(), 11);
+    assert_eq!(props.list_properties().len(), 11);
     props.connect_my_i32_notify(|props| props.set_my_str("Updated".into()));
     assert_eq!(props.my_str(), "");
     props.set_my_i32(5);
@@ -91,4 +97,6 @@ fn props() {
     assert_eq!(props.property::<i32>("my-i32"), 5);
     assert_eq!(props.my_str(), "Updated");
     assert_eq!(props.property::<String>("my-str"), "Updated");
+    assert_eq!(props.my_u8(), 19);
+    assert_eq!(props.my_construct_only(), 100.0);
 }

@@ -1,8 +1,10 @@
-use heck::ToSnakeCase;
+use heck::{ToKebabCase, ToSnakeCase};
 use proc_macro2::TokenStream;
-use proc_macro_error::abort;
 use quote::{format_ident, quote};
+use std::collections::HashSet;
 use syn::{parse::Parse, Token};
+
+use super::util::*;
 
 pub mod keywords {
     syn::custom_keyword!(name);
@@ -36,6 +38,21 @@ bitflags::bitflags! {
 }
 
 impl SignalFlags {
+    fn from_ident(ident: &syn::Ident) -> Option<Self> {
+        Some(match ident.to_string().as_str() {
+            "run_first" => SignalFlags::RUN_FIRST,
+            "run_last" => SignalFlags::RUN_LAST,
+            "run_cleanup" => SignalFlags::RUN_CLEANUP,
+            "no_recurse" => SignalFlags::NO_RECURSE,
+            "detailed" => SignalFlags::DETAILED,
+            "action" => SignalFlags::ACTION,
+            "no_hooks" => SignalFlags::NO_HOOKS,
+            "must_collect" => SignalFlags::MUST_COLLECT,
+            "deprecated" => SignalFlags::DEPRECATED,
+            "accumulator_first_run" => SignalFlags::ACCUMULATOR_FIRST_RUN,
+            _ => return None,
+        })
+    }
     fn tokens(&self, glib: &TokenStream) -> TokenStream {
         let count = Self::empty().bits().leading_zeros() - Self::all().bits().leading_zeros();
         let mut flags = vec![];
@@ -105,46 +122,26 @@ impl Parse for SignalAttrs {
                 } else {
                     return Err(lookahead.error());
                 }
+            } else if lookahead.peek(keywords::run_first)
+                || lookahead.peek(keywords::run_last)
+                || lookahead.peek(keywords::run_cleanup)
+                || lookahead.peek(keywords::no_recurse)
+                || lookahead.peek(keywords::detailed)
+                || lookahead.peek(keywords::action)
+                || lookahead.peek(keywords::no_hooks)
+                || lookahead.peek(keywords::must_collect)
+                || lookahead.peek(keywords::deprecated)
+                || lookahead.peek(keywords::accumulator_first_run)
+            {
+                let ident: syn::Ident = input.call(syn::ext::IdentExt::parse_any)?;
+                let flag = SignalFlags::from_ident(&ident).unwrap();
+                if attrs.flags.contains(flag) {
+                    let msg = format!("Duplicate `{}` attribute", ident);
+                    return Err(syn::Error::new_spanned(&ident, msg));
+                }
+                attrs.flags |= flag;
             } else {
-                use keywords::*;
-
-                macro_rules! parse_flags {
-                    (@body $name:ty: $kw:expr => $flag:expr) => {
-                        let kw = input.parse::<$name>()?;
-                        let flag = $flag;
-                        if attrs.flags.contains(flag) {
-                            let msg = format!("Duplicate `{}` attribute", <$name as syn::token::CustomToken>::display());
-                            return Err(syn::Error::new_spanned(kw, msg));
-                        }
-                        attrs.flags |= flag;
-                    };
-                    ($name:ty: $kw:expr => $flag:expr) => {
-                        if lookahead.peek($kw) {
-                            parse_flags!(@body $name: $kw => $flag);
-                        } else {
-                            return Err(lookahead.error());
-                        }
-                    };
-                    ($name:ty: $kw:expr => $flag:expr, $($names:ty: $kws:expr => $flags:expr),+) => {
-                        if lookahead.peek($kw) {
-                            parse_flags!(@body $name: $kw => $flag);
-                        } else {
-                            parse_flags! { $($names: $kws => $flags),+ }
-                        }
-                    };
-                }
-                parse_flags! {
-                    run_first:             run_first             => SignalFlags::RUN_FIRST,
-                    run_last:              run_last              => SignalFlags::RUN_LAST,
-                    run_cleanup:           run_cleanup           => SignalFlags::RUN_CLEANUP,
-                    no_recurse:            no_recurse            => SignalFlags::NO_RECURSE,
-                    detailed:              detailed              => SignalFlags::DETAILED,
-                    action:                action                => SignalFlags::ACTION,
-                    no_hooks:              no_hooks              => SignalFlags::NO_HOOKS,
-                    must_collect:          must_collect          => SignalFlags::MUST_COLLECT,
-                    deprecated:            deprecated            => SignalFlags::DEPRECATED,
-                    accumulator_first_run: accumulator_first_run => SignalFlags::ACCUMULATOR_FIRST_RUN
-                }
+                return Err(lookahead.error());
             }
             if !input.is_empty() {
                 input.parse::<Token![,]>()?;
@@ -166,7 +163,134 @@ pub struct Signal {
 }
 
 impl Signal {
-    pub fn new(ident: syn::Ident) -> Self {
+    pub fn from_items(
+        items: &mut Vec<syn::ImplItem>,
+        is_interface: bool,
+    ) -> syn::Result<Vec<Self>> {
+        let mut signal_names = HashSet::new();
+        let mut signals = Vec::<Signal>::new();
+
+        let mut index = 0;
+        loop {
+            if index >= items.len() {
+                break;
+            }
+            let mut signal_attr = None;
+            if let syn::ImplItem::Method(method) = &mut items[index] {
+                let signal_index = method.attrs.iter().position(|attr| {
+                    attr.path.is_ident("signal") || attr.path.is_ident("accumulator")
+                });
+                if let Some(signal_index) = signal_index {
+                    signal_attr.replace(method.attrs.remove(signal_index));
+                }
+                if let Some(next) = method.attrs.first() {
+                    return Err(syn::Error::new_spanned(
+                        next,
+                        "Unknown attribute on signal",
+                    ));
+                }
+            }
+            if let Some(attr) = signal_attr {
+                let sub = items.remove(index);
+                let mut method = match sub {
+                    syn::ImplItem::Method(method) => method,
+                    _ => unreachable!(),
+                };
+                if attr.path.is_ident("signal") {
+                    let signal = {
+                        let ident = &method.sig.ident;
+                        let signal_attrs = syn::parse2::<SignalAttrs>(attr.tokens.clone())?;
+                        let name = signal_attrs
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| ident.to_string().to_kebab_case());
+                        if !is_valid_name(&name) {
+                            if let Some(name) = &signal_attrs.name {
+                                return Err(syn::Error::new_spanned(name, format!("Invalid signal name '{}'. Signal names must start with an ASCII letter and only contain ASCII letters, numbers, '-' or '_'", name)));
+                            } else {
+                                return Err(syn::Error::new_spanned(&ident, format!("Invalid signal name '{}'. Signal names must start with an ASCII letter and only contain ASCII letters, numbers, '-' or '_'", ident)));
+                            }
+                        }
+                        if signal_names.contains(&name) {
+                            return Err(syn::Error::new_spanned(
+                                ident,
+                                format!("Duplicate definition for signal `{}`", name),
+                            ));
+                        }
+                        let signal = if let Some(i) = signals.iter().position(|s| s.ident == *ident)
+                        {
+                            &mut signals[i]
+                        } else {
+                            signals.push(Signal::new(ident.clone()));
+                            signals.last_mut().unwrap()
+                        };
+                        if signal.handler.is_some() {
+                            return Err(syn::Error::new_spanned(
+                                &ident,
+                                format!("Duplicate definition for signal `{}`", ident),
+                            ));
+                        }
+                        signal_names.insert(name.clone());
+                        signal.name = name;
+                        signal.flags = signal_attrs.flags;
+                        signal.emit = signal_attrs.emit;
+                        signal.connect = signal_attrs.connect;
+                        signal.interface = is_interface;
+                        signal
+                    };
+                    method.sig.ident =
+                        format_ident!("{}_class_handler", &signal.name.to_snake_case());
+                    signal.handler = Some(method);
+                } else if attr.path.is_ident("accumulator") {
+                    if !attr.tokens.is_empty() {
+                        return Err(syn::Error::new_spanned(
+                            &attr.tokens,
+                            "Unknown token on accumulator",
+                        ));
+                    }
+                    if matches!(method.sig.output, syn::ReturnType::Default) {
+                        return Err(syn::Error::new_spanned(
+                            method.sig.output,
+                            "accumulator must have return type",
+                        ));
+                    }
+                    let signal = {
+                        let ident = &method.sig.ident;
+                        let signal = if let Some(i) = signals.iter().position(|s| s.ident == *ident)
+                        {
+                            &mut signals[i]
+                        } else {
+                            signals.push(Signal::new(ident.clone()));
+                            signals.last_mut().unwrap()
+                        };
+                        if signal.accumulator.is_some() {
+                            return Err(syn::Error::new_spanned(&ident, format!("Duplicate definition for accumulator on signal definition `{}`", ident)));
+                        }
+                        signal
+                    };
+                    method.sig.ident = format_ident!("____accumulator");
+                    signal.accumulator = Some(method);
+                } else {
+                    unreachable!();
+                }
+            } else {
+                index += 1;
+            }
+        }
+
+        for signal in &signals {
+            if signal.handler.is_none() {
+                let acc = signal.accumulator.as_ref().expect("no accumulator");
+                return Err(syn::Error::new_spanned(
+                    acc,
+                    format!("No definition for signal `{}`", signal.ident),
+                ));
+            }
+        }
+
+        Ok(signals)
+    }
+    fn new(ident: syn::Ident) -> Self {
         Self {
             ident,
             name: Default::default(),
@@ -182,10 +306,7 @@ impl Signal {
         self.handler
             .as_ref()
             .map(|s| s.sig.inputs.iter())
-            .unwrap_or_else(|| {
-                let acc = self.accumulator.as_ref().expect("no accumulator");
-                abort!(acc, format!("No definition for signal `{}`", self.name));
-            })
+            .expect("no definition for signal")
     }
     fn arg_names(&self) -> impl Iterator<Item = syn::Ident> + Clone + '_ {
         self.inputs()
@@ -265,9 +386,9 @@ impl Signal {
                 )
             }
         });
-        let arg_names = self.arg_names();
-        let args_unwrap = self.args_unwrap(Some(self_ty), object_type, true, glib);
         let class_handler = (!handler.block.stmts.is_empty()).then(|| {
+            let arg_names = self.arg_names();
+            let args_unwrap = self.args_unwrap(Some(self_ty), object_type, true, glib);
             let method_name = &handler.sig.ident;
             quote! {
                 let builder = builder.class_handler(|_, args| {
@@ -355,6 +476,7 @@ impl Signal {
     ) -> TokenStream {
         let proto = self.signal_prototype(glib);
         quote! {
+            #[inline]
             #proto {
                 &#signals_path()[#index]
             }
@@ -422,6 +544,7 @@ impl Signal {
             _ => None,
         };
         quote! {
+            #[inline]
             #proto {
                 let ret = #body;
                 #unwrap
@@ -473,6 +596,7 @@ impl Signal {
             _ => quote! { ::core::option::Option::None },
         };
         quote! {
+            #[inline]
             #proto {
                 <Self as #glib::object::ObjectExt>::connect_local_id(
                     self,

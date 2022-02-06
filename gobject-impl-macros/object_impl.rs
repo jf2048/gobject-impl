@@ -1,5 +1,4 @@
 use proc_macro2::TokenStream;
-use proc_macro_error::abort;
 use quote::quote;
 
 use super::util::*;
@@ -12,10 +11,14 @@ impl syn::parse::Parse for ObjectImplArgs {
     }
 }
 
-pub fn object_impl(args: ObjectImplArgs, item: syn::ItemImpl) -> TokenStream {
-    let Args { trait_, pod, .. } = args.0;
+pub fn object_impl(args: ObjectImplArgs, item: syn::ItemImpl) -> syn::Result<TokenStream> {
+    let Args {
+        type_,
+        inheritance,
+        pod,
+    } = args.0;
 
-    let def = ObjectDefinition::new(item, pod, false).unwrap_or_else(|e| abort!(e));
+    let def = ObjectDefinition::new(item, pod, false)?;
 
     let go = go_crate_ident();
     let glib = quote! { #go::glib };
@@ -47,11 +50,11 @@ pub fn object_impl(args: ObjectImplArgs, item: syn::ItemImpl) -> TokenStream {
         prop_get_impls,
         prop_defs,
         signal_defs,
-        ext_trait,
+        public_methods,
     } = Output::new(
         &def,
-        None,
-        Some(&trait_),
+        type_.as_ref(),
+        &inheritance,
         &signals_path,
         &properties_path,
         &go,
@@ -145,12 +148,12 @@ pub fn object_impl(args: ObjectImplArgs, item: syn::ItemImpl) -> TokenStream {
     let self_ty = &item.self_ty;
     let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
 
-    quote! {
+    Ok(quote! {
         #struct_item
         #item
         impl #impl_generics #self_ty #ty_generics #where_clause {
             #(#private_impl_methods)*
         }
-        #ext_trait
-    }
+        #public_methods
+    })
 }

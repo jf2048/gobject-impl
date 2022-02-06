@@ -19,8 +19,8 @@ fn interface() {
             struct DummyInterface {
                 #[property(get, set)]
                 my_prop: u64,
-                #[property(get, set, explicit_notify)]
-                my_explicit_prop: u64,
+                #[property(get, set = auto, minimum = -10, maximum = 10)]
+                my_auto_prop: i64,
             }
         }
         #[signal]
@@ -48,8 +48,8 @@ fn interface() {
             pub struct ImplementorPrivate {
                 #[property(get, set, override = Dummy)]
                 my_prop: Cell<u64>,
-                #[property(get, set, override = Dummy, explicit_notify)]
-                my_explicit_prop: Cell<u64>,
+                #[property(get, set = auto, override = Dummy)]
+                my_auto_prop: Cell<i64>,
             }
         }
     }

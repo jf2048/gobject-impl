@@ -12,8 +12,9 @@ mod keywords {
     syn::custom_keyword!(skip);
     syn::custom_keyword!(get);
     syn::custom_keyword!(set);
-    syn::custom_keyword!(notify);
-    syn::custom_keyword!(connect_notify);
+    syn::custom_keyword!(auto); // for use with set
+    syn::custom_keyword!(notify_func);
+    syn::custom_keyword!(connect_notify_func);
 
     syn::custom_keyword!(name);
     syn::custom_keyword!(nick);
@@ -21,12 +22,13 @@ mod keywords {
     syn::custom_keyword!(minimum);
     syn::custom_keyword!(maximum);
     syn::custom_keyword!(default);
+    syn::custom_keyword!(subtype); // for use with ParamSpecGType
+    syn::custom_keyword!(variant); // for use with ParamSpecVariant
     syn::custom_keyword!(custom);
     syn::custom_keyword!(flags);
 
     syn::custom_keyword!(boxed);
     syn::custom_keyword!(object);
-    syn::custom_keyword!(variant);
     syn::custom_keyword!(storage);
 
     syn::custom_keyword!(construct);
@@ -49,6 +51,16 @@ bitflags::bitflags! {
 }
 
 impl PropertyFlags {
+    fn from_ident(ident: &syn::Ident) -> Option<Self> {
+        Some(match ident.to_string().as_str() {
+            "construct" => PropertyFlags::CONSTRUCT,
+            "construct_only" => PropertyFlags::CONSTRUCT_ONLY,
+            "lax_validation" => PropertyFlags::LAX_VALIDATION,
+            "explicit_notify" => PropertyFlags::EXPLICIT_NOTIFY,
+            "deprecated" => PropertyFlags::DEPRECATED,
+            _ => return None,
+        })
+    }
     fn tokens(&self, glib: &TokenStream, readable: bool, writable: bool) -> TokenStream {
         let count = Self::empty().bits().leading_zeros() - Self::all().bits().leading_zeros();
         let mut flags = vec![];
@@ -77,11 +89,10 @@ impl PropertyFlags {
 
 pub enum PropertyType {
     Unspecified,
-    Enum(Token![enum]),
-    Flags(keywords::flags),
-    Boxed(keywords::boxed),
-    Object(keywords::object),
-    Variant(keywords::variant, syn::LitStr),
+    Enum(syn::Ident),
+    Flags(syn::Ident),
+    Boxed(syn::Ident),
+    Object(syn::Ident),
 }
 
 impl Default for PropertyType {
@@ -91,13 +102,12 @@ impl Default for PropertyType {
 }
 
 impl PropertyType {
-    pub fn span(&self) -> Option<&Span> {
+    pub fn ident(&self) -> Option<&syn::Ident> {
         Some(match self {
-            PropertyType::Enum(kw) => &kw.span,
-            PropertyType::Flags(kw) => &kw.span,
-            PropertyType::Boxed(kw) => &kw.span,
-            PropertyType::Object(kw) => &kw.span,
-            PropertyType::Variant(kw, _) => &kw.span,
+            PropertyType::Enum(kw) => kw,
+            PropertyType::Flags(kw) => kw,
+            PropertyType::Boxed(kw) => kw,
+            PropertyType::Object(kw) => kw,
             _ => return None,
         })
     }
@@ -115,22 +125,49 @@ pub enum PropertyName {
     Custom(syn::LitStr),
 }
 
+#[derive(PartialEq)]
+pub enum PropertyPermission {
+    Deny,
+    Allow,
+    AllowAuto,
+    AllowCustomDefault,
+    AllowCustom(syn::Ident),
+}
+
+impl PropertyPermission {
+    fn default_for(set: bool, pod: bool) -> Self {
+        if pod {
+            if set {
+                Self::AllowAuto
+            } else {
+                Self::Allow
+            }
+        } else {
+            Self::Deny
+        }
+    }
+    fn is_allowed(&self) -> bool {
+        !matches!(self, Self::Deny)
+    }
+}
+
 pub struct Property {
     pub skip: bool,
     pub ty: syn::Type,
     pub special_type: PropertyType,
     pub storage: PropertyStorage,
     pub override_: Option<syn::Type>,
-    pub get: Option<Option<syn::Ident>>,
-    pub set: Option<Option<syn::Ident>>,
-    pub no_notify: Option<keywords::notify>,
-    pub no_connect_notify: Option<keywords::connect_notify>,
+    pub get: PropertyPermission,
+    pub set: PropertyPermission,
+    pub no_notify: Option<syn::Ident>,
+    pub no_connect_notify: Option<syn::Ident>,
     pub name: PropertyName,
     pub nick: Option<syn::LitStr>,
     pub blurb: Option<syn::LitStr>,
     pub buildable_props: Vec<(syn::Ident, syn::Lit)>,
+    pub subtype: Option<syn::Type>,
     pub flags: PropertyFlags,
-    pub flag_spans: Vec<Span>,
+    pub flag_idents: Vec<syn::Ident>,
 }
 
 impl Property {
@@ -194,16 +231,17 @@ impl Property {
             special_type: PropertyType::Unspecified,
             storage,
             override_: None,
-            get: pod.then(|| None),
-            set: pod.then(|| None),
+            get: PropertyPermission::default_for(false, pod),
+            set: PropertyPermission::default_for(true, pod),
             no_notify: None,
             no_connect_notify: None,
             name: PropertyName::Field(field.ident.clone().expect("no field ident")),
             nick: None,
             blurb: None,
             buildable_props: vec![],
+            subtype: None,
             flags: PropertyFlags::empty(),
-            flag_spans: vec![],
+            flag_idents: vec![],
         }
     }
     fn parse(field: &mut syn::Field, pod: bool, iface: bool) -> syn::Result<Self> {
@@ -245,59 +283,68 @@ impl Property {
                 prop.skip = true;
             } else if lookahead.peek(keywords::get) {
                 let kw = input.parse::<keywords::get>()?;
-                if (!pod && prop.get.is_some()) || (pod && !matches!(&prop.get, Some(None))) {
+                if prop.get != PropertyPermission::default_for(false, pod) {
                     return Err(syn::Error::new_spanned(kw, "Duplicate `get` attribute"));
                 }
-                if pod || input.peek(Token![=]) {
+                if !iface && (pod || input.peek(Token![=])) {
                     input.parse::<Token![=]>()?;
-                    if iface || input.peek(Token![_]) {
+                    if input.peek(Token![_]) {
                         input.parse::<Token![_]>()?;
-                        prop.get.replace(Some(format_ident!("_")));
+                        prop.get = PropertyPermission::AllowCustomDefault;
                     } else {
-                        prop.get.replace(Some(input.parse()?));
+                        prop.get = PropertyPermission::AllowCustom(input.parse()?);
                     }
                 } else {
-                    prop.get.replace(None);
+                    prop.get = PropertyPermission::Allow;
                 }
             } else if lookahead.peek(keywords::set) {
                 let kw = input.parse::<keywords::set>()?;
-                if (!pod && prop.set.is_some()) || (pod && !matches!(&prop.set, Some(None))) {
+                if prop.set != PropertyPermission::default_for(true, pod) {
                     return Err(syn::Error::new_spanned(kw, "Duplicate `set` attribute"));
                 }
                 if pod || input.peek(Token![=]) {
                     input.parse::<Token![=]>()?;
-                    if iface || input.peek(Token![_]) {
+                    if !iface && input.peek(Token![_]) {
                         input.parse::<Token![_]>()?;
-                        prop.set.replace(Some(format_ident!("_")));
+                        prop.set = PropertyPermission::AllowCustomDefault;
+                    } else if iface || input.peek(keywords::auto) {
+                        let kw = input.parse::<keywords::auto>()?;
+                        if pod {
+                            return Err(syn::Error::new_spanned(
+                                kw,
+                                "unneccesary `set = auto` on `pod` type",
+                            ));
+                        }
+                        prop.set = PropertyPermission::AllowAuto;
                     } else {
-                        prop.set.replace(Some(input.parse()?));
+                        prop.set = PropertyPermission::AllowCustom(input.parse()?);
                     }
                 } else {
-                    prop.set.replace(None);
+                    prop.set = PropertyPermission::Allow;
                 }
             } else if lookahead.peek(Token![!]) {
                 input.parse::<Token![!]>()?;
                 let lookahead = input.lookahead1();
                 if pod && lookahead.peek(keywords::get) {
                     let kw = input.parse::<keywords::get>()?;
-                    if !matches!(&prop.get, Some(None)) {
+                    if prop.get != PropertyPermission::default_for(false, pod) {
                         return Err(syn::Error::new_spanned(kw, "Duplicate `get` attribute"));
                     }
-                    prop.get.take();
+                    prop.get = PropertyPermission::Deny;
                 } else if pod && lookahead.peek(keywords::set) {
                     let kw = input.parse::<keywords::set>()?;
-                    if !matches!(&prop.set, Some(None)) {
+                    if prop.set != PropertyPermission::default_for(true, pod) {
                         return Err(syn::Error::new_spanned(kw, "Duplicate `set` attribute"));
                     }
-                    prop.set.take();
-                } else if lookahead.peek(keywords::notify) {
-                    let kw = input.parse::<keywords::notify>()?;
+                    prop.set = PropertyPermission::Deny;
+                } else if lookahead.peek(keywords::notify_func) {
+                    let kw = input.call(syn::ext::IdentExt::parse_any)?;
                     if prop.no_notify.is_some() {
                         return Err(syn::Error::new_spanned(kw, "Duplicate `notify` attribute"));
                     }
                     prop.no_notify.replace(kw);
-                } else if lookahead.peek(keywords::connect_notify) {
-                    let kw = input.parse::<keywords::connect_notify>()?;
+                } else if lookahead.peek(keywords::connect_notify_func) {
+                    let kw = input.call(syn::ext::IdentExt::parse_any)?;
                     if prop.no_connect_notify.is_some() {
                         return Err(syn::Error::new_spanned(
                             kw,
@@ -321,47 +368,40 @@ impl Property {
                     return Err(syn::Error::new_spanned(kw, "Duplicate `nick` attribute"));
                 }
                 input.parse::<Token![=]>()?;
-                prop.nick.replace(input.parse::<syn::LitStr>()?);
+                prop.nick.replace(input.parse()?);
             } else if lookahead.peek(keywords::blurb) {
                 let kw = input.parse::<keywords::blurb>()?;
                 if prop.blurb.is_some() {
                     return Err(syn::Error::new_spanned(kw, "Duplicate `blurb` attribute"));
                 }
                 input.parse::<Token![=]>()?;
-                prop.blurb.replace(input.parse::<syn::LitStr>()?);
-            } else if lookahead.peek(keywords::minimum) {
-                let kw = input.parse::<keywords::minimum>()?;
-                let ident = format_ident!("minimum");
+                prop.blurb.replace(input.parse()?);
+            } else if lookahead.peek(keywords::minimum)
+                || lookahead.peek(keywords::maximum)
+                || lookahead.peek(keywords::default)
+            {
+                let ident = input.call(syn::ext::IdentExt::parse_any)?;
                 if prop.buildable_props.iter().any(|(n, _)| *n == ident) {
-                    return Err(syn::Error::new_spanned(kw, "Duplicate `minimum` attribute"));
+                    return Err(syn::Error::new_spanned(
+                        &ident,
+                        format!("Duplicate `{}` attribute", ident),
+                    ));
                 }
                 input.parse::<Token![=]>()?;
-                prop.buildable_props
-                    .push((ident, input.parse::<syn::Lit>()?));
-            } else if lookahead.peek(keywords::maximum) {
-                let kw = input.parse::<keywords::maximum>()?;
-                let ident = format_ident!("maximum");
-                if prop.buildable_props.iter().any(|(n, _)| *n == ident) {
-                    return Err(syn::Error::new_spanned(kw, "Duplicate `maximum` attribute"));
+                prop.buildable_props.push((ident, input.parse()?));
+            } else if lookahead.peek(keywords::subtype) {
+                let kw = input.parse::<keywords::subtype>()?;
+                if prop.subtype.is_some() {
+                    return Err(syn::Error::new_spanned(kw, "Duplicate `subtype` attribute"));
                 }
                 input.parse::<Token![=]>()?;
-                prop.buildable_props
-                    .push((ident, input.parse::<syn::Lit>()?));
-            } else if lookahead.peek(keywords::default) {
-                let kw = input.parse::<keywords::default>()?;
-                let ident = format_ident!("default");
-                if prop.buildable_props.iter().any(|(n, _)| *n == ident) {
-                    return Err(syn::Error::new_spanned(kw, "Duplicate `default` attribute"));
-                }
-                input.parse::<Token![=]>()?;
-                prop.buildable_props
-                    .push((ident, input.parse::<syn::Lit>()?));
+                prop.subtype.replace(input.parse()?);
             } else if lookahead.peek(keywords::custom) {
                 input.parse::<keywords::custom>()?;
                 let custom;
                 syn::parenthesized!(custom in input);
                 while custom.is_empty() {
-                    let ident = custom.parse()?;
+                    let ident = custom.call(syn::ext::IdentExt::parse_any)?;
                     if prop.buildable_props.iter().any(|(n, _)| *n == ident) {
                         return Err(syn::Error::new_spanned(
                             &ident,
@@ -376,7 +416,7 @@ impl Property {
                     prop.buildable_props.push((ident, value));
                 }
             } else if lookahead.peek(Token![enum]) {
-                let kw = input.parse::<Token![enum]>()?;
+                let kw = input.call(syn::ext::IdentExt::parse_any)?;
                 if matches!(prop.special_type, PropertyType::Unspecified) {
                     prop.special_type = PropertyType::Enum(kw);
                 } else {
@@ -386,7 +426,7 @@ impl Property {
                     ));
                 }
             } else if lookahead.peek(keywords::flags) {
-                let kw = input.parse::<keywords::flags>()?;
+                let kw = input.call(syn::ext::IdentExt::parse_any)?;
                 if matches!(prop.special_type, PropertyType::Unspecified) {
                     prop.special_type = PropertyType::Flags(kw);
                 } else {
@@ -396,7 +436,7 @@ impl Property {
                     ));
                 }
             } else if lookahead.peek(keywords::boxed) {
-                let kw = input.parse::<keywords::boxed>()?;
+                let kw = input.call(syn::ext::IdentExt::parse_any)?;
                 if matches!(prop.special_type, PropertyType::Unspecified) {
                     prop.special_type = PropertyType::Boxed(kw);
                 } else {
@@ -406,7 +446,7 @@ impl Property {
                     ));
                 }
             } else if lookahead.peek(keywords::object) {
-                let kw = input.parse::<keywords::object>()?;
+                let kw = input.call(syn::ext::IdentExt::parse_any)?;
                 if matches!(prop.special_type, PropertyType::Unspecified) {
                     prop.special_type = PropertyType::Object(kw);
                 } else {
@@ -416,17 +456,16 @@ impl Property {
                     ));
                 }
             } else if lookahead.peek(keywords::variant) {
-                let kw = input.parse::<keywords::variant>()?;
-                if matches!(prop.special_type, PropertyType::Unspecified) {
-                    input.parse::<Token![=]>()?;
-                    let element = input.parse::<syn::LitStr>()?;
-                    prop.special_type = PropertyType::Variant(kw, element);
-                } else {
+                let ident = input.call(syn::ext::IdentExt::parse_any)?;
+                if prop.buildable_props.iter().any(|(n, _)| *n == ident) {
                     return Err(syn::Error::new_spanned(
-                        kw,
-                        "Only one of `enum`, `flags`, `boxed`, `object`, `variant` is allowed",
+                        &ident,
+                        format!("Duplicate `{}` attribute", ident),
                     ));
                 }
+                input.parse::<Token![=]>()?;
+                let s = input.parse::<syn::LitStr>()?;
+                prop.buildable_props.push((ident, syn::Lit::Str(s)));
             } else if !iface && lookahead.peek(Token![override]) {
                 let kw = input.parse::<Token![override]>()?;
                 if prop.override_.is_some() {
@@ -456,42 +495,22 @@ impl Property {
                 }
                 input.parse::<Token![=]>()?;
                 prop.storage = PropertyStorage::Delegate(Box::new(input.parse::<syn::Expr>()?));
+            } else if lookahead.peek(keywords::construct)
+                || lookahead.peek(keywords::construct_only)
+                || lookahead.peek(keywords::lax_validation)
+                || lookahead.peek(keywords::explicit_notify)
+                || lookahead.peek(keywords::deprecated)
+            {
+                let ident: syn::Ident = input.call(syn::ext::IdentExt::parse_any)?;
+                let flag = PropertyFlags::from_ident(&ident).unwrap();
+                if prop.flags.contains(flag) {
+                    let msg = format!("Duplicate `{}` attribute", ident);
+                    return Err(syn::Error::new_spanned(&ident, msg));
+                }
+                prop.flag_idents.push(ident);
+                prop.flags |= flag;
             } else {
-                use keywords::*;
-
-                macro_rules! parse_flags {
-                    (@body $name:ty: $kw:expr => $flag:expr) => {
-                        let kw = input.parse::<$name>()?;
-                        let flag = $flag;
-                        if prop.flags.contains(flag) {
-                            let msg = format!("Duplicate `{}` attribute", <$name as syn::token::CustomToken>::display());
-                            return Err(syn::Error::new_spanned(kw, msg));
-                        }
-                        prop.flag_spans.push(kw.span);
-                        prop.flags |= flag;
-                    };
-                    ($name:ty: $kw:expr => $flag:expr) => {
-                        if lookahead.peek($kw) {
-                            parse_flags!(@body $name: $kw => $flag);
-                        } else {
-                            return Err(lookahead.error());
-                        }
-                    };
-                    ($name:ty: $kw:expr => $flag:expr, $($names:ty: $kws:expr => $flags:expr),+) => {
-                        if lookahead.peek($kw) {
-                            parse_flags!(@body $name: $kw => $flag);
-                        } else {
-                            parse_flags! { $($names: $kws => $flags),+ }
-                        }
-                    };
-                }
-                parse_flags! {
-                    construct:       construct       => PropertyFlags::CONSTRUCT,
-                    construct_only:  construct_only  => PropertyFlags::CONSTRUCT_ONLY,
-                    lax_validation:  construct_only  => PropertyFlags::CONSTRUCT_ONLY,
-                    explicit_notify: explicit_notify => PropertyFlags::EXPLICIT_NOTIFY,
-                    deprecated:      deprecated      => PropertyFlags::DEPRECATED
-                }
+                return Err(lookahead.error());
             }
             first = false;
             if !input.is_empty() {
@@ -505,11 +524,27 @@ impl Property {
             if !is_valid_name(&name) {
                 return Err(syn::Error::new(prop.name_span(), format!("Invalid property name '{}'. Property names must start with an ASCII letter and only contain ASCII letters, numbers, '-' or '_'", name)));
             }
-            if prop.get.is_none() && prop.set.is_none() {
+            if !prop.get.is_allowed() && !prop.set.is_allowed() {
                 return Err(syn::Error::new_spanned(
                     field.ident.as_ref().expect("no field ident"),
                     "Property must have at least one of `get` and `set`",
                 ));
+            }
+            if let PropertyPermission::AllowCustom(method) = &prop.get {
+                if method == &prop.getter_name() {
+                    return Err(syn::Error::new_spanned(
+                        method,
+                        "custom getter name conflicts with trait method",
+                    ));
+                }
+            }
+            if let PropertyPermission::AllowCustom(method) = &prop.set {
+                if method == &prop.setter_name() {
+                    return Err(syn::Error::new_spanned(
+                        method,
+                        "custom setter name conflicts with trait method",
+                    ));
+                }
             }
             if prop.override_.is_some() {
                 if let Some(nick) = &prop.nick {
@@ -524,25 +559,23 @@ impl Property {
                         "`blurb` not allowed on override property",
                     ));
                 }
-                if let Some((ident, _)) = prop.buildable_props.first() {
-                    return Err(syn::Error::new_spanned(
-                        ident,
-                        format!("`{}` not allowed on override property", ident),
-                    ));
-                }
-                for span in &prop.flag_spans {
-                    let flag = span.unwrap().source_text();
-                    let flag = flag.as_deref().unwrap_or_default();
-                    if flag != "explicit_notify" {
-                        return Err(syn::Error::new(
-                            *span,
-                            format!("{} not allowed on override property", flag),
+                for (ident, _) in &prop.buildable_props {
+                    if ident != "minimum" && ident != "maximum" {
+                        return Err(syn::Error::new_spanned(
+                            ident,
+                            format!("`{}` not allowed on override property", ident),
                         ));
                     }
                 }
-                if let Some(span) = prop.special_type.span() {
-                    return Err(syn::Error::new(
-                        *span,
+                if let Some(flag) = prop.flag_idents.first() {
+                    return Err(syn::Error::new_spanned(
+                        &flag,
+                        format!("`{}` not allowed on override property", flag),
+                    ));
+                }
+                if let Some(ident) = prop.special_type.ident() {
+                    return Err(syn::Error::new_spanned(
+                        ident,
                         "type specifier not allowed on override property",
                     ));
                 }
@@ -559,38 +592,32 @@ impl Property {
                     ));
                 }
             }
-            if let PropertyStorage::Virtual(_) = &prop.storage {
-                if matches!(prop.get, Some(None)) {
-                    prop.get.replace(Some(prop.getter_name()));
+            if matches!(prop.set, PropertyPermission::AllowAuto) {
+                for flag in &prop.flag_idents {
+                    if flag == "explicit_notify" || flag == "lax_validation" {
+                        return Err(syn::Error::new_spanned(
+                            &flag,
+                            format!("`{}` unnecessary when using `set = auto`", flag),
+                        ));
+                    }
                 }
-                if matches!(prop.set, Some(None)) {
-                    prop.set.replace(Some(prop.setter_name()));
+                prop.flags |= PropertyFlags::EXPLICIT_NOTIFY | PropertyFlags::LAX_VALIDATION;
+            }
+            if matches!(prop.storage, PropertyStorage::Virtual(_)) {
+                if matches!(prop.get, PropertyPermission::Allow) {
+                    prop.get = PropertyPermission::AllowCustomDefault;
+                }
+                if matches!(prop.set, PropertyPermission::Allow) {
+                    prop.set = PropertyPermission::AllowCustomDefault;
                 }
             }
-            if !iface {
-                let getter = prop
-                    .get
-                    .as_ref()
-                    .and_then(|i| i.as_ref().map(|i| i.to_string()));
-                if matches!(getter.as_deref(), Some("_")) {
-                    prop.get.replace(Some(prop.getter_name()));
-                }
-                let setter = prop
-                    .set
-                    .as_ref()
-                    .and_then(|i| i.as_ref().map(|i| i.to_string()));
-                if matches!(setter.as_deref(), Some("_")) {
-                    prop.set.replace(Some(prop.setter_name()));
-                }
-                if matches!(prop.set, Some(Some(_)))
-                    && prop.get.is_some()
-                    && !prop.flags.contains(PropertyFlags::EXPLICIT_NOTIFY)
-                {
-                    return Err(syn::Error::new_spanned(
-                        prop.ty,
-                        "readwrite property with custom setter must have `explicit_notify` attribute",
-                    ));
-                }
+            if matches!(prop.get, PropertyPermission::AllowCustomDefault) {
+                let ident = format_ident!("_{}", prop.name().to_snake_case());
+                prop.get = PropertyPermission::AllowCustom(ident);
+            }
+            if matches!(prop.set, PropertyPermission::AllowCustomDefault) {
+                let ident = format_ident!("_set_{}", prop.name().to_snake_case());
+                prop.set = PropertyPermission::AllowCustom(ident);
             }
         }
 
@@ -616,11 +643,8 @@ impl Property {
             .unwrap_or_else(|| name.clone());
         let flags = self
             .flags
-            .tokens(&glib, self.get.is_some(), self.set.is_some());
+            .tokens(&glib, self.get.is_allowed(), self.set.is_allowed());
         let ty = self.inner_type(go);
-        let static_type = quote! {
-            <<#ty as #glib::value::ValueType>::Type as #glib::StaticType>::static_type(),
-        };
         let props = self
             .buildable_props
             .iter()
@@ -642,12 +666,19 @@ impl Property {
         };
         let type_prop = match &self.special_type {
             PropertyType::Unspecified => None,
-            PropertyType::Variant(_, element) => Some(quote! { .type_(#element) }),
-            _ => Some(quote! { .type_(#static_type) }),
+            _ => Some(quote! {
+                .type_::<<#ty as #glib::value::ValueType>::Type>()
+            }),
         };
+        let subtype_prop = self.subtype.as_ref().map(|subtype| {
+            quote! {
+                .subtype::<<#subtype as #glib::value::ValueType>::Type>()
+            }
+        });
         quote! {
             #builder
             #type_prop
+            #subtype_prop
             #(#props)*
             .build(#name, #nick, #blurb, #flags)
         }
@@ -664,16 +695,16 @@ impl Property {
             PropertyName::Custom(name) => name.span(),
         }
     }
+    fn is_object(&self) -> bool {
+        !matches!(self.storage, PropertyStorage::Interface)
+    }
     fn inner_type(&self, go: &syn::Ident) -> TokenStream {
         let ty = &self.ty;
-        if self.is_interface() || matches!(self.storage, PropertyStorage::Virtual(_)) {
-            quote! { #ty }
-        } else {
+        if self.is_object() && !matches!(self.storage, PropertyStorage::Virtual(_)) {
             quote! { <#ty as #go::ParamStore>::Type }
+        } else {
+            quote! { #ty }
         }
-    }
-    fn is_interface(&self) -> bool {
-        matches!(self.storage, PropertyStorage::Interface)
     }
     fn field_storage(&self, object_type: Option<&TokenStream>, go: &syn::Ident) -> TokenStream {
         let recv = if let Some(object_type) = object_type {
@@ -691,54 +722,48 @@ impl Property {
             _ => unreachable!("cannot get storage for interface/virtual property"),
         }
     }
-    #[inline]
-    fn method_call(
-        method_name: &syn::Ident,
-        args: TokenStream,
-        trait_name: &syn::Ident,
-        glib: &TokenStream,
-    ) -> TokenStream {
-        quote! {
-            <<Self as #glib::subclass::types::ObjectSubclass>::Type as #trait_name>::#method_name(obj, #args)
-        }
+    fn find_buildable_prop(&self, name: &str) -> Option<&syn::Lit> {
+        self.buildable_props
+            .iter()
+            .find_map(|(i, l)| (i == name).then(|| l))
     }
     #[inline]
     fn getter_name(&self) -> syn::Ident {
         format_ident!("{}", self.name().to_snake_case())
     }
-    #[inline]
-    fn setter_name(&self) -> syn::Ident {
-        format_ident!("set_{}", self.name().to_snake_case())
-    }
     pub fn get_impl(
         &self,
         index: usize,
-        trait_name: Option<&syn::Ident>,
+        inheritance: &ClassInheritance,
         go: &syn::Ident,
     ) -> Option<TokenStream> {
-        if self.is_interface() {
+        if !self.is_object() {
             return None;
         }
-        self.get.as_ref().map(|method| {
+        self.get.is_allowed().then(|| {
             let glib = quote! { #go::glib };
-            let expr = if let Some(method) = method {
+            let body = if self.override_.is_none() {
+                let method_name = self.getter_name();
+                let recv_ty = match inheritance {
+                    ClassInheritance::Abstract(trait_name) => quote! {
+                        <<Self as #glib::subclass::types::ObjectSubclass>::Type as #trait_name>
+                    },
+                    ClassInheritance::Final => quote! {
+                        <Self as #glib::subclass::types::ObjectSubclass>::Type
+                    },
+                };
+                quote! {
+                    #glib::ToValue::to_value(&#recv_ty::#method_name(obj))
+                }
+            } else if let PropertyPermission::AllowCustom(method) = &self.get {
                 quote! { #glib::ToValue::to_value(&obj.#method()) }
             } else {
-                match (trait_name, self.override_.is_some()) {
-                    (Some(trait_name), false) => {
-                        let method_name = self.getter_name();
-                        let call = Self::method_call(&method_name, quote! {}, trait_name, &glib);
-                        quote! { #glib::ToValue::to_value(&#call) }
-                    }
-                    _ => {
-                        let field = self.field_storage(None, go);
-                        quote! { #go::ParamStoreRead::get_value(&#field) }
-                    }
-                }
+                let field = self.field_storage(None, go);
+                quote! { #go::ParamStoreRead::get_value(&#field) }
             };
             quote! {
                 #index => {
-                    #expr
+                    #body
                 }
             }
         })
@@ -747,7 +772,7 @@ impl Property {
         if self.override_.is_some() {
             return None;
         }
-        matches!(self.get, Some(None)).then(|| {
+        self.get.is_allowed().then(|| {
             let method_name = self.getter_name();
             let ty = self.inner_type(go);
             quote! { fn #method_name(&self) -> #ty }
@@ -759,72 +784,121 @@ impl Property {
         go: &syn::Ident,
     ) -> Option<TokenStream> {
         self.getter_prototype(go).map(|proto| {
-            let body = if self.is_interface() {
-                let name = self.name();
-                quote! { <Self as #go::glib::object::ObjectExt>::property(self, #name) }
-            } else {
+            let body = if let PropertyPermission::AllowCustom(method) = &self.get {
+                quote! { self.upcast_ref::<#object_type>().#method() }
+            } else if self.is_object() {
                 let field = self.field_storage(Some(object_type), go);
                 quote! { #go::ParamStoreRead::get(&#field) }
+            } else {
+                let name = self.name();
+                quote! { <Self as #go::glib::object::ObjectExt>::property(self, #name) }
             };
             quote! {
+                #[inline]
                 #proto {
                     #body
                 }
             }
         })
     }
+    #[inline]
+    fn setter_name(&self) -> syn::Ident {
+        format_ident!("set_{}", self.name().to_snake_case())
+    }
+    #[inline]
+    fn can_inline_set(&self) -> bool {
+        self.flags
+            .contains(PropertyFlags::EXPLICIT_NOTIFY | PropertyFlags::LAX_VALIDATION)
+    }
+    fn setter_validations(&self) -> Option<TokenStream> {
+        if !self.flags.contains(PropertyFlags::LAX_VALIDATION) {
+            return None;
+        }
+        let min = self
+            .find_buildable_prop("minimum")
+            .map(|min| quote! { assert!(value >= #min); });
+        let max = self
+            .find_buildable_prop("maximum")
+            .map(|max| quote! { assert!(value <= #max); });
+        Some(quote! {
+            #min
+            #max
+        })
+    }
     pub fn set_impl(
         &self,
         index: usize,
-        trait_name: Option<&syn::Ident>,
+        inheritance: &ClassInheritance,
         go: &syn::Ident,
     ) -> Option<TokenStream> {
-        if self.is_interface() {
+        if !self.is_object() {
             return None;
         }
-        self.set.as_ref().map(|method| {
-            let ty = self.inner_type(go);
-            let set = if let Some(method) = &method {
-                quote! { obj.#method(value.get_owned::<#ty>().unwrap()); }
-            } else {
-                let explicit = self.get.is_some() && self.flags.contains(PropertyFlags::EXPLICIT_NOTIFY);
-                match (trait_name, explicit, self.override_.is_some()) {
-                    (Some(trait_name), true, false) => {
-                        let method_name = self.setter_name();
-                        let glib = quote! { #go::glib };
-                        let call = Self::method_call(
-                            &method_name,
-                            quote! { value.get_owned().unwrap() },
-                            trait_name,
-                            &glib,
-                        );
-                        quote! { #call; }
-                    }
-                    (_, true, true) => {
-                        let field = self.field_storage(None, go);
-                        quote! {
-                            if #go::ParamStoreWrite::set_value_checked(&#field, &value) {
-                                <<Self as #go::glib::subclass::types::ObjectSubclass>::Type as #go::glib::object::ObjectExt>::notify_by_pspec(
-                                    obj,
-                                    pspec
-                                );
-                            }
+        self.set.is_allowed().then(|| {
+            let glib = quote! { #go::glib };
+            let can_inline = self.can_inline_set();
+            let construct_only = self.flags.contains(PropertyFlags::CONSTRUCT_ONLY);
+            let is_override = self.override_.is_some();
+            let body = match (can_inline, construct_only, is_override) {
+                (true, false, false) => {
+                    let method_name = self.setter_name();
+                    let recv_ty = match inheritance {
+                        ClassInheritance::Abstract(trait_name) => quote! {
+                            <<Self as #glib::subclass::types::ObjectSubclass>::Type as #trait_name>
+                        },
+                        ClassInheritance::Final => quote! {
+                            <Self as #glib::subclass::types::ObjectSubclass>::Type
                         }
-                    }
-                    _ => {
-                        let field = self.field_storage(None, go);
-                        quote! { #go::ParamStoreWrite::set_value(&#field, &value); }
+                    };
+                    quote! { #recv_ty::#method_name(obj, value.get_owned().unwrap()); }
+                }
+                _ => {
+                    let ty = self.inner_type(go);
+                    match &self.set {
+                        PropertyPermission::AllowCustom(method) => quote! {
+                            obj.#method(value.get_owned::<#ty>().unwrap());
+                        },
+                        PropertyPermission::AllowAuto => {
+                            let field = self.field_storage(None, go);
+                            let validations = self.setter_validations();
+                            let set = if self.get.is_allowed() && self.flags.contains(PropertyFlags::EXPLICIT_NOTIFY) {
+                                quote! {
+                                    if #go::ParamStoreWriteChanged::set_checked(&#field, value) {
+                                        <<Self as #glib::subclass::types::ObjectSubclass>::Type as #glib::object::ObjectExt>::notify_by_pspec(
+                                            obj,
+                                            pspec
+                                        );
+                                    }
+                                }
+                            } else {
+                                quote! {
+                                    #go::ParamStoreWrite::set_value(&#field, &value);
+                                }
+                            };
+                            quote! {
+                                let value = value.get_owned::<#ty>().unwrap();
+                                #validations
+                                #set
+                            }
+                        },
+                        PropertyPermission::Allow => {
+                            let field = self.field_storage(None, go);
+                            quote! {
+                                #go::ParamStoreWrite::set_value(&#field, &value);
+                            }
+                        },
+                        _ => unreachable!()
                     }
                 }
             };
-            quote! { #index => { #set } }
+            quote! { #index => { #body } }
         })
     }
     pub fn setter_prototype(&self, go: &syn::Ident) -> Option<TokenStream> {
-        if self.override_.is_some() {
+        if self.override_.is_some() || self.flags.contains(PropertyFlags::CONSTRUCT_ONLY) {
             return None;
         }
-        matches!(self.set, Some(None)).then(|| {
+        self.set.is_allowed().then(|| {
             let method_name = self.setter_name();
             let ty = self.inner_type(go);
             quote! { fn #method_name(&self, value: #ty) }
@@ -838,20 +912,41 @@ impl Property {
         go: &syn::Ident,
     ) -> Option<TokenStream> {
         self.setter_prototype(go).map(|proto| {
-            let explicit =
-                self.get.is_some() && self.flags.contains(PropertyFlags::EXPLICIT_NOTIFY);
-            let body = match (self.is_interface(), explicit) {
-                (false, true) => {
-                    let field = self.field_storage(Some(object_type), go);
-                    quote! {
-                        if #go::ParamStoreWrite::set_checked(&#field, value) {
-                            <Self as #go::glib::object::ObjectExt>::notify_by_pspec(
-                                self,
-                                &#properties_path()[#index]
-                            );
+            let body = match (self.is_object(), self.can_inline_set()) {
+                (true, true) => match &self.set {
+                    PropertyPermission::AllowCustom(method) => quote! {
+                        self.upcast_ref::<#object_type>().#method(value);
+                    },
+                    PropertyPermission::AllowAuto => {
+                        let field = self.field_storage(Some(object_type), go);
+                        let validations = self.setter_validations();
+                        let set = if self.get.is_allowed() {
+                            quote! {
+                                if #go::ParamStoreWriteChanged::set_checked(&#field, value) {
+                                    <Self as #go::glib::object::ObjectExt>::notify_by_pspec(
+                                        self,
+                                        &#properties_path()[#index]
+                                    );
+                                }
+                            }
+                        } else {
+                            quote! {
+                                #go::ParamStoreWriteChanged::set(&#field, value);
+                            }
+                        };
+                        quote! {
+                            #validations
+                            #set
                         }
                     }
-                }
+                    PropertyPermission::Allow => {
+                        let field = self.field_storage(Some(object_type), go);
+                        quote! {
+                            #go::ParamStoreWriteChanged::set(&#field, value);
+                        }
+                    }
+                    _ => unreachable!(),
+                },
                 _ => {
                     let name = self.name();
                     quote! {
@@ -860,6 +955,7 @@ impl Property {
                 }
             };
             quote! {
+                #[inline]
                 #proto {
                     #body
                 }
@@ -878,6 +974,7 @@ impl Property {
     ) -> Option<TokenStream> {
         self.pspec_prototype(glib).map(|proto| {
             quote! {
+                #[inline]
                 #proto { &#properties_path()[#index] }
             }
         })
@@ -897,6 +994,7 @@ impl Property {
     ) -> Option<TokenStream> {
         self.notify_prototype().map(|proto| {
             quote! {
+                #[inline]
                 #proto {
                     <Self as #glib::object::ObjectExt>::notify_by_pspec(
                         self,
@@ -919,6 +1017,7 @@ impl Property {
         self.connect_prototype(glib).map(|proto| {
             let name = self.name();
             quote! {
+                #[inline]
                 #proto {
                     <Self as #glib::object::ObjectExt>::connect_notify_local(
                         self,
