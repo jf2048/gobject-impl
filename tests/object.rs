@@ -82,6 +82,8 @@ mod obj_inner {
                 pub struct ObjInner {
                     #[property(get, set)]
                     my_prop: std::cell::Cell<u64>,
+
+                    my_uint: std::cell::Cell<u32>,
                 }
             }
             #[signal]
@@ -95,13 +97,37 @@ mod obj_inner {
                         "my-uint",
                         "my-uint",
                         0,
-                        0,
+                        u32::MAX,
                         0,
                         glib::ParamFlags::READWRITE,
                     ));
                     props
                 });
                 PROPERTIES.as_ref()
+            }
+            fn set_property(
+                &self,
+                obj: &Self::Type,
+                id: usize,
+                value: &glib::Value,
+                pspec: &glib::ParamSpec,
+            ) {
+                match pspec.name() {
+                    "my-uint" => self.my_uint.set(value.get().unwrap()),
+                    _ => self.inner_set_property(obj, id, value, pspec),
+                }
+            }
+
+            fn property(
+                &self,
+                obj: &Self::Type,
+                id: usize,
+                pspec: &glib::ParamSpec,
+            ) -> glib::Value {
+                match pspec.name() {
+                    "my-uint" => glib::ToValue::to_value(&self.my_uint.get()),
+                    _ => self.inner_property(obj, id, pspec),
+                }
             }
             fn signals() -> &'static [glib::subclass::Signal] {
                 use glib::once_cell::sync::Lazy as SyncLazy;
@@ -128,4 +154,8 @@ fn object_inner_methods() {
     assert_eq!(obj.list_properties().len(), 2);
     obj.emit_abc();
     obj.emit_by_name::<()>("xyz", &[]);
+    obj.set_my_prop(22);
+    obj.set_property("my-uint", 500u32);
+    assert_eq!(obj.my_prop(), 22);
+    assert_eq!(obj.property::<u32>("my-uint"), 500);
 }

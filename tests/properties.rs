@@ -113,7 +113,7 @@ fn complex_properties() {
         properties! {
             #[derive(Default)]
             pub struct DummyObjectPrivate {
-                #[property(get, set, name = "renamed-string")]
+                #[property(name = "renamed-string", get, set, construct, default = "foobar")]
                 a_string: RefCell<String>,
             }
         }
@@ -174,6 +174,7 @@ fn complex_properties() {
     let dummy = glib::Object::new::<DummyObject>(&[]).unwrap();
     let obj = glib::Object::new::<ComplexProps>(&[("dummy", &dummy)]).unwrap();
     obj.set_renamed_string("hello".into());
+    assert_eq!(&*obj.dummy().renamed_string(), "foobar");
 }
 
 #[test]
