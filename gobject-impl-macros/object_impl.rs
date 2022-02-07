@@ -18,12 +18,11 @@ pub fn object_impl(args: ObjectImplArgs, item: syn::ItemImpl) -> syn::Result<Tok
         pod,
     } = args.0;
 
-    let def = ObjectDefinition::new(item, pod, false)?;
+    let mut def = ObjectDefinition::new(item, pod, false)?;
 
     let go = go_crate_ident();
     let glib = quote! { #go::glib };
 
-    let (has_signals, signals_ident) = has_method(&def.item.items, "signals");
     let (has_properties, properties_ident) = has_method(&def.item.items, "properties");
     let (has_set_property, set_property_ident) = has_method(&def.item.items, "set_property");
     let (has_property, property_ident) = has_method(&def.item.items, "property");
@@ -31,11 +30,7 @@ pub fn object_impl(args: ObjectImplArgs, item: syn::ItemImpl) -> syn::Result<Tok
     let (signals_path, properties_path) = {
         let self_ty = &def.item.self_ty;
         (
-            if has_signals {
-                quote! { #self_ty::#signals_ident }
-            } else {
-                quote! { <#self_ty as #glib::subclass::object::ObjectImpl>::#signals_ident }
-            },
+            quote! { <#self_ty as #glib::subclass::object::ObjectImpl>::signals },
             if has_properties {
                 quote! { #self_ty::#properties_ident }
             } else {
@@ -49,10 +44,9 @@ pub fn object_impl(args: ObjectImplArgs, item: syn::ItemImpl) -> syn::Result<Tok
         prop_set_impls,
         prop_get_impls,
         prop_defs,
-        signal_defs,
         public_methods,
     } = Output::new(
-        &def,
+        &mut def,
         type_.as_ref(),
         &inheritance,
         &signals_path,
@@ -65,19 +59,6 @@ pub fn object_impl(args: ObjectImplArgs, item: syn::ItemImpl) -> syn::Result<Tok
         struct_item,
         ..
     } = def;
-
-    if let Some(signal_defs) = &signal_defs {
-        let signals_def = quote! {
-            fn #signals_ident() -> &'static [#glib::subclass::Signal] {
-                #signal_defs
-            }
-        };
-        if has_signals {
-            private_impl_methods.push(signals_def);
-        } else {
-            item.items.push(syn::ImplItem::Verbatim(signals_def));
-        }
-    }
 
     if let Some(prop_defs) = &prop_defs {
         let properties_def = quote! {

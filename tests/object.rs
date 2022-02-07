@@ -63,3 +63,69 @@ fn object_abstract() {
     obj.set_my_prop(52);
     obj.emit_abc();
 }
+
+mod obj_inner {
+    pub use imp::ObjInnerExt;
+    glib::wrapper! {
+        pub struct ObjInner(ObjectSubclass<imp::ObjInner>);
+    }
+    mod imp {
+        #[glib::object_subclass]
+        impl glib::subclass::types::ObjectSubclass for ObjInner {
+            const NAME: &'static str = "ObjInner";
+            type Type = super::ObjInner;
+        }
+        #[gobject_impl::object_impl(trait = ObjInnerExt)]
+        impl glib::subclass::object::ObjectImpl for ObjInner {
+            properties! {
+                #[derive(Default)]
+                pub struct ObjInner {
+                    #[property(get, set)]
+                    my_prop: std::cell::Cell<u64>,
+                }
+            }
+            #[signal]
+            fn abc(&self) {}
+            fn properties() -> &'static [glib::ParamSpec] {
+                use glib::once_cell::sync::Lazy as SyncLazy;
+                static PROPERTIES: SyncLazy<Vec<glib::ParamSpec>> = SyncLazy::new(|| {
+                    let mut props = ObjInner::inner_properties().to_owned();
+                    props.push(glib::ParamSpecUInt::new(
+                        "my-uint",
+                        "my-uint",
+                        "my-uint",
+                        0,
+                        0,
+                        0,
+                        glib::ParamFlags::READWRITE,
+                    ));
+                    props
+                });
+                PROPERTIES.as_ref()
+            }
+            fn signals() -> &'static [glib::subclass::Signal] {
+                use glib::once_cell::sync::Lazy as SyncLazy;
+                static SIGNALS: SyncLazy<Vec<glib::subclass::Signal>> = SyncLazy::new(|| {
+                    let mut signals = ObjInner::inner_signals();
+                    signals.push(
+                        glib::subclass::Signal::builder("xyz", &[], glib::Type::UNIT.into())
+                            .build(),
+                    );
+                    signals
+                });
+                SIGNALS.as_ref()
+            }
+        }
+    }
+}
+
+#[test]
+fn object_inner_methods() {
+    use glib::prelude::*;
+    use obj_inner::ObjInnerExt;
+
+    let obj = glib::Object::new::<obj_inner::ObjInner>(&[]).unwrap();
+    assert_eq!(obj.list_properties().len(), 2);
+    obj.emit_abc();
+    obj.emit_by_name::<()>("xyz", &[]);
+}

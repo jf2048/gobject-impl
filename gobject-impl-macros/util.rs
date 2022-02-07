@@ -228,13 +228,12 @@ pub struct Output {
     pub prop_set_impls: Vec<TokenStream>,
     pub prop_get_impls: Vec<TokenStream>,
     pub prop_defs: Option<TokenStream>,
-    pub signal_defs: Option<TokenStream>,
     pub public_methods: TokenStream,
 }
 
 impl Output {
     pub fn new(
-        definition: &ObjectDefinition,
+        definition: &mut ObjectDefinition,
         object_type: Option<&syn::Type>,
         inheritance: &ClassInheritance,
         signals_path: &TokenStream,
@@ -246,28 +245,39 @@ impl Output {
             signals,
             properties,
             ..
-        } = &definition;
+        } = definition;
         let glib = quote! { #go::glib };
 
         let mut private_impl_methods = vec![];
         let mut prototypes = vec![];
         let mut methods = vec![];
 
-        let signal_defs = if signals.is_empty() {
-            None
-        } else {
+        if !signals.is_empty() {
             let signals = signals
                 .iter()
                 .map(|signal| signal.create(&item.self_ty, object_type, &glib));
-            Some(quote! {
+            let signal_defs = quote! { vec![ #(#signals),* ] };
+            let static_def = quote! {
                 static SIGNALS: #glib::once_cell::sync::Lazy<::std::vec::Vec<#glib::subclass::Signal>> = #glib::once_cell::sync::Lazy::new(|| {
-                    vec![
-                        #(#signals),*
-                    ]
+                    #signal_defs
                 });
                 ::core::convert::AsRef::as_ref(::std::ops::Deref::deref(&SIGNALS))
-            })
-        };
+            };
+            let (has_signals, signals_ident) = has_method(&item.items, "signals");
+            if has_signals {
+                private_impl_methods.push(quote! {
+                    fn #signals_ident() -> Vec<#glib::subclass::Signal> {
+                        #signal_defs
+                    }
+                });
+            } else {
+                item.items.push(syn::ImplItem::Verbatim(quote! {
+                    fn #signals_ident() -> &'static [#glib::subclass::Signal] {
+                        #static_def
+                    }
+                }));
+            }
+        }
 
         for (index, signal) in signals.iter().enumerate() {
             prototypes.push(make_stmt(signal.signal_prototype(&glib)));
@@ -295,7 +305,7 @@ impl Output {
             if let Some(set) = prop.set_impl(index, inheritance, go) {
                 prop_set_impls.push(set);
             }
-            if let Some(get) = prop.get_impl(index, inheritance, go) {
+            if let Some(get) = prop.get_impl(index, go) {
                 prop_get_impls.push(get);
             }
         }
@@ -398,7 +408,6 @@ impl Output {
             prop_set_impls,
             prop_get_impls,
             prop_defs,
-            signal_defs,
             public_methods,
         }
     }

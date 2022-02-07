@@ -20,7 +20,7 @@ pub fn interface_impl(args: InterfaceImplArgs, item: syn::ItemImpl) -> syn::Resu
 
     let type_ = type_.expect("no type");
 
-    let def = ObjectDefinition::new(item, pod, true)?;
+    let mut def = ObjectDefinition::new(item, pod, true)?;
 
     let go = go_crate_ident();
     let glib = quote! { #go::glib };
@@ -47,11 +47,10 @@ pub fn interface_impl(args: InterfaceImplArgs, item: syn::ItemImpl) -> syn::Resu
     let Output {
         mut private_impl_methods,
         prop_defs,
-        signal_defs,
         public_methods,
         ..
     } = Output::new(
-        &def,
+        &mut def,
         Some(&type_),
         &inheritance,
         &signals_path,
@@ -60,19 +59,6 @@ pub fn interface_impl(args: InterfaceImplArgs, item: syn::ItemImpl) -> syn::Resu
     );
 
     let ObjectDefinition { mut item, .. } = def;
-
-    if let Some(signal_defs) = &signal_defs {
-        let signals_def = quote! {
-            fn #signals_ident() -> &'static [#glib::subclass::Signal] {
-                #signal_defs
-            }
-        };
-        if has_signals {
-            private_impl_methods.push(signals_def);
-        } else {
-            item.items.push(syn::ImplItem::Verbatim(signals_def));
-        }
-    }
 
     if let Some(prop_defs) = &prop_defs {
         let properties_def = quote! {

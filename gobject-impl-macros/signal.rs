@@ -10,6 +10,7 @@ pub mod keywords {
     syn::custom_keyword!(name);
     syn::custom_keyword!(emit);
     syn::custom_keyword!(connect);
+
     syn::custom_keyword!(run_first);
     syn::custom_keyword!(run_last);
     syn::custom_keyword!(run_cleanup);
@@ -19,7 +20,6 @@ pub mod keywords {
     syn::custom_keyword!(no_hooks);
     syn::custom_keyword!(must_collect);
     syn::custom_keyword!(deprecated);
-    syn::custom_keyword!(accumulator_first_run);
 }
 
 bitflags::bitflags! {
@@ -33,7 +33,6 @@ bitflags::bitflags! {
         const NO_HOOKS              = 1 << 6;
         const MUST_COLLECT          = 1 << 7;
         const DEPRECATED            = 1 << 8;
-        const ACCUMULATOR_FIRST_RUN = 1 << 17;
     }
 }
 
@@ -49,7 +48,6 @@ impl SignalFlags {
             "no_hooks" => SignalFlags::NO_HOOKS,
             "must_collect" => SignalFlags::MUST_COLLECT,
             "deprecated" => SignalFlags::DEPRECATED,
-            "accumulator_first_run" => SignalFlags::ACCUMULATOR_FIRST_RUN,
             _ => return None,
         })
     }
@@ -131,7 +129,6 @@ impl Parse for SignalAttrs {
                 || lookahead.peek(keywords::no_hooks)
                 || lookahead.peek(keywords::must_collect)
                 || lookahead.peek(keywords::deprecated)
-                || lookahead.peek(keywords::accumulator_first_run)
             {
                 let ident: syn::Ident = input.call(syn::ext::IdentExt::parse_any)?;
                 let flag = SignalFlags::from_ident(&ident).unwrap();
@@ -245,10 +242,16 @@ impl Signal {
                             "Unknown token on accumulator",
                         ));
                     }
+                    if !(2..=3).contains(&method.sig.inputs.len()) {
+                        return Err(syn::Error::new_spanned(
+                            method.sig.output,
+                            "Accumulator must have 2 or 3 arguments",
+                        ));
+                    }
                     if matches!(method.sig.output, syn::ReturnType::Default) {
                         return Err(syn::Error::new_spanned(
                             method.sig.output,
-                            "accumulator must have return type",
+                            "Accumulator must have return type",
                         ));
                     }
                     let signal = {
@@ -276,7 +279,16 @@ impl Signal {
         }
 
         for signal in &signals {
-            if signal.handler.is_none() {
+            if let Some(handler) = &signal.handler {
+                if signal.accumulator.is_some()
+                    && matches!(handler.sig.output, syn::ReturnType::Default)
+                {
+                    return Err(syn::Error::new_spanned(
+                        handler,
+                        "Signal with accumulator must have return type",
+                    ));
+                }
+            } else {
                 let acc = signal.accumulator.as_ref().expect("no accumulator");
                 return Err(syn::Error::new_spanned(
                     acc,
@@ -395,12 +407,25 @@ impl Signal {
                 });
             }
         });
+        let output = match &handler.sig.output {
+            syn::ReturnType::Type(_, ty) => quote! { #ty },
+            _ => quote! { () },
+        };
         let accumulator = accumulator.as_ref().map(|method| {
             let ident = &method.sig.ident;
+            let call_args = if method.sig.inputs.len() == 2 {
+                quote! { &mut output, value }
+            } else {
+                quote! { _hint, &mut output, value }
+            };
             quote! {
-                let builder = builder.accumulator(|hint, acc, value| {
+                let builder = builder.accumulator(|_hint, accu, value| {
                     #method
-                    #ident(hint, acc, value)
+                    let mut output = accu.get().unwrap();
+                    let value = value.get().unwrap();
+                    let #glib::Continue(ret) = #ident(#call_args);
+                    *accu = #glib::ToValue::to_value(&output);
+                    ret
                 });
             }
         });
@@ -408,10 +433,6 @@ impl Signal {
             let flags = flags.tokens(glib);
             quote! { let builder = builder.flags(#flags); }
         });
-        let output = match &handler.sig.output {
-            o @ syn::ReturnType::Type(_, _) => quote! { #o },
-            _ => quote! { () },
-        };
         quote_spanned! { handler.span() =>
             {
                 let param_types = [#(#input_static_types),*];
@@ -532,20 +553,10 @@ impl Signal {
         } else {
             emit
         };
-        let unwrap = match &handler.sig.output {
-            syn::ReturnType::Type(_, _) => Some(quote! {
-                let ret = #glib::closure::TryFromClosureReturnValue::try_from_closure_return_value(
-                    ret
-                ).unwrap();
-            }),
-            _ => None,
-        };
         quote_spanned! { handler.span() =>
             #proto {
                 #![inline]
-                let ret = #body;
-                #unwrap
-                ret
+                #body
             }
         }
     }
@@ -581,7 +592,7 @@ impl Signal {
         let args_unwrap = self.args_unwrap(None, None, false, glib).skip(1);
 
         let details = if self.flags.contains(SignalFlags::DETAILED) {
-            quote! { details, }
+            quote! { details }
         } else {
             quote! { ::std::option::Option::None }
         };

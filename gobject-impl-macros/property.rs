@@ -558,22 +558,6 @@ impl Property {
                     "Property must have at least one of `get` and `set`",
                 ));
             }
-            if let PropertyPermission::AllowCustom(method) = &self.get {
-                if method == &self.getter_name() {
-                    return Err(syn::Error::new_spanned(
-                        method,
-                        "custom getter name conflicts with trait method",
-                    ));
-                }
-            }
-            if let PropertyPermission::AllowCustom(method) = &self.set {
-                if method == &self.setter_name() {
-                    return Err(syn::Error::new_spanned(
-                        method,
-                        "custom setter name conflicts with trait method",
-                    ));
-                }
-            }
             if self.override_.is_some() {
                 if let Some(nick) = &self.nick {
                     return Err(syn::Error::new_spanned(
@@ -611,7 +595,7 @@ impl Property {
                     if let Some(token) = &self.no_override_inherit {
                         return Err(syn::Error::new_spanned(
                             token,
-                            "`!inherit` unnecessary when using `override_class`",
+                            "`!inherit` is unnecessary when using `override_class`",
                         ));
                     }
                     self.no_override_inherit.replace(target.to_token_stream());
@@ -629,6 +613,20 @@ impl Property {
                             "`connect_notify` not allowed on inherited override property",
                         ));
                     }
+                }
+            }
+            if self.flags.contains(PropertyFlags::CONSTRUCT_ONLY) {
+                if let Some(notify) = &self.no_notify {
+                    return Err(syn::Error::new_spanned(
+                        notify,
+                        "`!notify` is unnecessary when using `construct_only`",
+                    ));
+                }
+                if let Some(connect_notify) = &self.no_connect_notify {
+                    return Err(syn::Error::new_spanned(
+                        connect_notify,
+                        "`!connect_notify` is unnecessary when using `construct_only`",
+                    ));
                 }
             }
             if matches!(self.set, PropertyPermission::AllowAuto) {
@@ -651,12 +649,22 @@ impl Property {
                 }
             }
             if matches!(self.get, PropertyPermission::AllowCustomDefault) {
-                let ident = format_ident!("_{}", self.name().to_snake_case());
+                let ident = self.getter_name();
                 self.get = PropertyPermission::AllowCustom(ident);
             }
             if matches!(self.set, PropertyPermission::AllowCustomDefault) {
-                let ident = format_ident!("_set_{}", self.name().to_snake_case());
+                let mut ident = self.setter_name();
+                if !self.can_inline_set() {
+                    ident = format_ident!("_{}", self.setter_name());
+                }
                 self.set = PropertyPermission::AllowCustom(ident);
+            } else if let PropertyPermission::AllowCustom(method) = &self.set {
+                if !self.can_inline_set() && method == &self.setter_name() {
+                    return Err(syn::Error::new_spanned(
+                        method,
+                        "custom setter name conflicts with trait method",
+                    ));
+                }
             }
         }
 
@@ -778,31 +786,10 @@ impl Property {
     fn getter_name(&self) -> syn::Ident {
         format_ident!("{}", self.name().to_snake_case())
     }
-    pub fn get_impl(
-        &self,
-        index: usize,
-        inheritance: &ClassInheritance,
-        go: &syn::Ident,
-    ) -> Option<TokenStream> {
-        if !self.is_object() {
-            return None;
-        }
-        self.get.is_allowed().then(|| {
+    pub fn get_impl(&self, index: usize, go: &syn::Ident) -> Option<TokenStream> {
+        (self.is_object() && self.get.is_allowed()).then(|| {
             let glib = quote! { #go::glib };
-            let body = if !self.is_inherited() {
-                let method_name = self.getter_name();
-                let recv_ty = match inheritance {
-                    ClassInheritance::Abstract(trait_name) => quote! {
-                        <<Self as #glib::subclass::types::ObjectSubclass>::Type as #trait_name>
-                    },
-                    ClassInheritance::Final => quote! {
-                        <Self as #glib::subclass::types::ObjectSubclass>::Type
-                    },
-                };
-                quote! {
-                    #glib::ToValue::to_value(&#recv_ty::#method_name(obj))
-                }
-            } else if let PropertyPermission::AllowCustom(method) = &self.get {
+            let body = if let PropertyPermission::AllowCustom(method) = &self.get {
                 quote! { #glib::ToValue::to_value(&obj.#method()) }
             } else {
                 let field = self.field_storage(None, go);
@@ -816,12 +803,14 @@ impl Property {
         })
     }
     pub fn getter_prototype(&self, go: &syn::Ident) -> Option<TokenStream> {
-        if self.is_inherited() {
-            return None;
-        }
-        self.get.is_allowed().then(|| {
+        (!self.is_inherited() && matches!(self.get, PropertyPermission::Allow)).then(|| {
             let method_name = self.getter_name();
-            let ty = self.inner_type(go);
+            let ty = if self.is_object() {
+                let ty = &self.ty;
+                quote! { <#ty as #go::ParamStoreRead<'_>>::BorrowOrGetType }
+            } else {
+                self.inner_type(go)
+            };
             quote_spanned! { self.span => fn #method_name(&self) -> #ty }
         })
     }
@@ -831,11 +820,9 @@ impl Property {
         go: &syn::Ident,
     ) -> Option<TokenStream> {
         self.getter_prototype(go).map(|proto| {
-            let body = if let PropertyPermission::AllowCustom(method) = &self.get {
-                quote! { #go::glib::Cast::upcast_ref::<#object_type>(self).#method() }
-            } else if self.is_object() {
+            let body = if self.is_object() {
                 let field = self.field_storage(Some(object_type), go);
-                quote! { #go::ParamStoreRead::get(&#field) }
+                quote! { #go::ParamStoreRead::borrow_or_get(&#field) }
             } else {
                 let name = self.name();
                 quote! { <Self as #go::glib::object::ObjectExt>::property(self, #name) }
@@ -858,18 +845,17 @@ impl Property {
             .contains(PropertyFlags::EXPLICIT_NOTIFY | PropertyFlags::LAX_VALIDATION)
     }
     fn setter_validations(&self) -> Option<TokenStream> {
-        if !self.flags.contains(PropertyFlags::LAX_VALIDATION) {
-            return None;
-        }
-        let min = self
-            .find_buildable_prop("minimum")
-            .map(|min| quote! { assert!(value >= #min); });
-        let max = self
-            .find_buildable_prop("maximum")
-            .map(|max| quote! { assert!(value <= #max); });
-        Some(quote! {
-            #min
-            #max
+        self.flags.contains(PropertyFlags::LAX_VALIDATION).then(|| {
+            let min = self
+                .find_buildable_prop("minimum")
+                .map(|min| quote! { assert!(value >= #min); });
+            let max = self
+                .find_buildable_prop("maximum")
+                .map(|max| quote! { assert!(value <= #max); });
+            quote! {
+                #min
+                #max
+            }
         })
     }
     pub fn set_impl(
@@ -878,10 +864,7 @@ impl Property {
         inheritance: &ClassInheritance,
         go: &syn::Ident,
     ) -> Option<TokenStream> {
-        if !self.is_object() {
-            return None;
-        }
-        self.set.is_allowed().then(|| {
+        (self.is_object() && self.set.is_allowed()).then(|| {
             let glib = quote! { #go::glib };
             let can_inline = self.can_inline_set();
             let construct_only = self.flags.contains(PropertyFlags::CONSTRUCT_ONLY);
@@ -897,20 +880,23 @@ impl Property {
                             <Self as #glib::subclass::types::ObjectSubclass>::Type
                         }
                     };
-                    quote! { #recv_ty::#method_name(obj, value.get_owned().unwrap()); }
+                    quote! { #recv_ty::#method_name(obj, value.get().unwrap()); }
                 }
                 _ => {
                     let ty = self.inner_type(go);
                     match &self.set {
                         PropertyPermission::AllowCustom(method) => quote! {
-                            obj.#method(value.get_owned::<#ty>().unwrap());
+                            obj.#method(value.get::<#ty>().unwrap());
                         },
                         PropertyPermission::AllowAuto => {
                             let field = self.field_storage(None, go);
                             let validations = self.setter_validations();
-                            let set = if self.get.is_allowed() && self.flags.contains(PropertyFlags::EXPLICIT_NOTIFY) {
+                            let set = if self.get.is_allowed()
+                                && self.flags.contains(PropertyFlags::EXPLICIT_NOTIFY)
+                                && !construct_only
+                            {
                                 quote! {
-                                    if #go::ParamStoreWriteChanged::set_checked(&#field, value) {
+                                    if #go::ParamStoreWriteChanged::set_owned_checked(&#field, value) {
                                         <<Self as #glib::subclass::types::ObjectSubclass>::Type as #glib::object::ObjectExt>::notify_by_pspec(
                                             obj,
                                             pspec
@@ -919,11 +905,11 @@ impl Property {
                                 }
                             } else {
                                 quote! {
-                                    #go::ParamStoreWrite::set_value(&#field, &value);
+                                    #go::ParamStoreWrite::set_owned(&#field, value);
                                 }
                             };
                             quote! {
-                                let value = value.get_owned::<#ty>().unwrap();
+                                let value = value.get::<#ty>().unwrap();
                                 #validations
                                 #set
                             }
@@ -942,14 +928,16 @@ impl Property {
         })
     }
     pub fn setter_prototype(&self, go: &syn::Ident) -> Option<TokenStream> {
-        if self.is_inherited() || self.flags.contains(PropertyFlags::CONSTRUCT_ONLY) {
-            return None;
-        }
-        self.set.is_allowed().then(|| {
-            let method_name = self.setter_name();
-            let ty = self.inner_type(go);
-            quote_spanned! { self.span => fn #method_name(&self, value: #ty) }
-        })
+        let construct_only = self.flags.contains(PropertyFlags::CONSTRUCT_ONLY);
+        let custom_inline =
+            self.can_inline_set() && matches!(self.set, PropertyPermission::AllowCustom(_));
+        (!construct_only && !self.is_inherited() && (!custom_inline || self.set.is_allowed())).then(
+            || {
+                let method_name = self.setter_name();
+                let ty = self.inner_type(go);
+                quote_spanned! { self.span => fn #method_name(&self, value: #ty) }
+            },
+        )
     }
     pub fn setter_definition(
         &self,
@@ -969,7 +957,7 @@ impl Property {
                         let validations = self.setter_validations();
                         let set = if self.get.is_allowed() {
                             quote! {
-                                if #go::ParamStoreWriteChanged::set_checked(&#field, value) {
+                                if #go::ParamStoreWriteChanged::set_owned_checked(&#field, value) {
                                     <Self as #go::glib::object::ObjectExt>::notify_by_pspec(
                                         self,
                                         &#properties_path()[#index]
@@ -978,7 +966,7 @@ impl Property {
                             }
                         } else {
                             quote! {
-                                #go::ParamStoreWriteChanged::set(&#field, value);
+                                #go::ParamStoreWrite::set_owned(&#field, value);
                             }
                         };
                         quote! {
@@ -989,7 +977,7 @@ impl Property {
                     PropertyPermission::Allow => {
                         let field = self.field_storage(Some(object_type), go);
                         quote! {
-                            #go::ParamStoreWriteChanged::set(&#field, value);
+                            #go::ParamStoreWrite::set_owned(&#field, value);
                         }
                     }
                     _ => unreachable!(),
@@ -1029,11 +1017,14 @@ impl Property {
         })
     }
     pub fn notify_prototype(&self) -> Option<TokenStream> {
-        if self.is_inherited() || self.no_notify.is_some() || !self.get.is_allowed() {
-            return None;
-        }
-        let method_name = format_ident!("notify_{}", self.name().to_snake_case());
-        Some(quote_spanned! { self.span => fn #method_name(&self) })
+        (!self.is_inherited()
+            && self.get.is_allowed()
+            && !self.flags.contains(PropertyFlags::CONSTRUCT_ONLY)
+            && self.no_notify.is_none())
+        .then(|| {
+            let method_name = format_ident!("notify_{}", self.name().to_snake_case());
+            quote_spanned! { self.span => fn #method_name(&self) }
+        })
     }
     pub fn notify_definition(
         &self,
@@ -1054,12 +1045,15 @@ impl Property {
         })
     }
     pub fn connect_prototype(&self, glib: &TokenStream) -> Option<TokenStream> {
-        if self.is_inherited() || self.no_connect_notify.is_some() {
-            return None;
-        }
-        let method_name = format_ident!("connect_{}_notify", self.name().to_snake_case());
-        Some(quote_spanned! { self.span =>
-            fn #method_name<F: Fn(&Self) + 'static>(&self, f: F) -> #glib::SignalHandlerId
+        (!self.is_inherited()
+            && self.get.is_allowed()
+            && !self.flags.contains(PropertyFlags::CONSTRUCT_ONLY)
+            && self.no_connect_notify.is_none())
+        .then(|| {
+            let method_name = format_ident!("connect_{}_notify", self.name().to_snake_case());
+            quote_spanned! { self.span =>
+                fn #method_name<F: Fn(&Self) + 'static>(&self, f: F) -> #glib::SignalHandlerId
+            }
         })
     }
     pub fn connect_definition(&self, glib: &TokenStream) -> Option<TokenStream> {
