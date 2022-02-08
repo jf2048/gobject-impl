@@ -13,6 +13,7 @@ mod keywords {
     syn::custom_keyword!(get);
     syn::custom_keyword!(set);
 
+    syn::custom_keyword!(borrow);
     syn::custom_keyword!(set_inline);
     syn::custom_keyword!(notify_func);
     syn::custom_keyword!(connect_notify_func);
@@ -177,6 +178,7 @@ pub struct Property {
     pub storage: PropertyStorage,
     pub override_: Option<PropertyOverride>,
     pub get: PropertyPermission,
+    pub borrow: Option<syn::Ident>,
     pub set: PropertyPermission,
     pub set_inline: Option<Option<syn::Ident>>,
     pub no_notify: Option<syn::Ident>,
@@ -253,6 +255,7 @@ impl Property {
             storage,
             override_: None,
             get: PropertyPermission::default_for(pod),
+            borrow: None,
             set: PropertyPermission::default_for(pod),
             set_inline: pod.then(|| None),
             no_notify: None,
@@ -324,6 +327,12 @@ impl Property {
                 } else {
                     *perm = PropertyPermission::Allow;
                 }
+            } else if !iface && lookahead.peek(keywords::borrow) {
+                let kw = input.parse()?;
+                if prop.borrow.is_some() {
+                    return Err(syn::Error::new_spanned(kw, "Duplicate `borrow` attribute"));
+                }
+                prop.borrow.replace(kw);
             } else if !pod && !iface && lookahead.peek(keywords::set_inline) {
                 let kw = input.parse()?;
                 if prop.set_inline.is_some() {
@@ -588,6 +597,25 @@ impl Property {
                 "Property must have at least one of `get` and `set`",
             ));
         }
+        if let Some(borrow) = &self.borrow {
+            if !self.get.is_allowed() {
+                return Err(syn::Error::new_spanned(
+                    borrow,
+                    "`borrow` not allowed on write-only property",
+                ));
+            }
+            match &self.storage {
+                PropertyStorage::Abstract(_) => return Err(syn::Error::new_spanned(
+                    borrow,
+                    "`borrow` not allowed on abstract property",
+                )),
+                PropertyStorage::Computed(_) => return Err(syn::Error::new_spanned(
+                    borrow,
+                    "`borrow` not allowed on computed property",
+                )),
+                _ => {},
+            }
+        }
         if self.override_.is_some() {
             if let Some(nick) = &self.nick {
                 return Err(syn::Error::new_spanned(
@@ -838,7 +866,7 @@ impl Property {
                 quote! { #glib::ToValue::to_value(&obj.#method()) }
             } else {
                 let field = self.field_storage(None, go);
-                quote! { #go::ParamStoreRead::get_value(&#field) }
+                quote! { #go::ParamStoreReadValue::get_value(&#field) }
             };
             quote_spanned! { self.span =>
                 #index => {
@@ -850,12 +878,7 @@ impl Property {
     pub fn getter_prototype(&self, go: &syn::Ident) -> Option<TokenStream> {
         (!self.is_inherited() && matches!(self.get, PropertyPermission::Allow)).then(|| {
             let method_name = self.getter_name();
-            let ty = if self.is_abstract() {
-                self.inner_type(go)
-            } else {
-                let ty = &self.ty;
-                quote! { <#ty as #go::ParamStoreRead<'_>>::BorrowOrGetType }
-            };
+            let ty = self.inner_type(go);
             quote_spanned! { self.span => fn #method_name(&self) -> #ty }
         })
     }
@@ -870,12 +893,42 @@ impl Property {
                 quote! { <Self as #go::glib::object::ObjectExt>::property(self, #name) }
             } else {
                 let field = self.field_storage(Some(object_type), go);
-                quote! { #go::ParamStoreRead::borrow_or_get(&#field) }
+                quote! { #go::ParamStoreRead::get_owned(&#field) }
             };
             quote_spanned! { self.span =>
                 #proto {
                     #![inline]
                     #body
+                }
+            }
+        })
+    }
+    #[inline]
+    fn borrow_name(&self) -> syn::Ident {
+        format_ident!("borrow_{}", self.name().to_snake_case())
+    }
+    pub fn borrow_prototype(&self, go: &syn::Ident) -> Option<TokenStream> {
+        self.borrow.as_ref().map(|_| {
+            let method_name = self.borrow_name();
+            let ty = if self.is_abstract() {
+                self.inner_type(go)
+            } else {
+                let ty = &self.ty;
+                quote! { <#ty as #go::ParamStoreBorrow<'_>>::BorrowType }
+            };
+            quote_spanned! { self.span => fn #method_name(&self) -> #ty }
+        })
+    }
+    pub fn borrow_definition(
+        &self,
+        object_type: &TokenStream,
+        go: &syn::Ident,
+    ) -> Option<TokenStream> {
+        self.borrow_prototype(go).map(|proto| {
+            let field = self.field_storage(Some(object_type), go);
+            quote_spanned! { self.span =>
+                #proto {
+                    #go::ParamStoreBorrow::borrow(&#field)
                 }
             }
         })

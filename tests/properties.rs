@@ -38,7 +38,7 @@ fn basic_properties() {
                 writable_i32: Cell<i32>,
                 #[property(get, set)]
                 my_i32: Cell<i32>,
-                #[property(get, set)]
+                #[property(get, set, borrow)]
                 my_str: RefCell<String>,
                 #[property(get, set)]
                 my_mutex: Mutex<i32>,
@@ -96,11 +96,12 @@ fn basic_properties() {
     assert_eq!(BasicPropsPrivate::properties().len(), 15);
     assert_eq!(props.list_properties().len(), 15);
     props.connect_my_i32_notify(|props| props.set_my_str("Updated".into()));
-    assert_eq!(*props.my_str(), "");
+    assert_eq!(props.my_str(), "");
     props.set_my_i32(5);
     assert_eq!(props.my_i32(), 5);
     assert_eq!(props.property::<i32>("my-i32"), 5);
-    assert_eq!(*props.my_str(), "Updated");
+    assert_eq!(props.my_str(), "Updated");
+    assert_eq!(*props.borrow_my_str(), "Updated");
     assert_eq!(props.property::<String>("my-str"), "Updated");
     assert_eq!(props.my_u8(), 19);
     assert_eq!(props.my_construct_only(), 100.0);

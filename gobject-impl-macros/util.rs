@@ -359,6 +359,13 @@ impl Output {
                         .expect("no getter definition"),
                 );
             }
+            if let Some(borrow) = prop.borrow_prototype(go) {
+                prototypes.push(make_stmt(borrow));
+                methods.push(
+                    prop.borrow_definition(&self_ty, go)
+                        .expect("no borrow definition"),
+                );
+            }
             if let Some(setter) = prop.setter_prototype(go) {
                 prototypes.push(make_stmt(setter));
                 methods.push(

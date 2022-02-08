@@ -336,11 +336,16 @@ impl ParamSpecBuildable for glib::Variant {
 pub trait ParamStore {
     type Type: ValueType;
 }
-pub trait ParamStoreRead<'a>: ParamStore {
-    type BorrowOrGetType;
+pub trait ParamStoreRead: ParamStore {
+    fn get_owned(&self) -> <Self as ParamStore>::Type;
+}
+pub trait ParamStoreReadValue: ParamStore {
+    fn get_value(&self) -> glib::Value;
+}
+pub trait ParamStoreBorrow<'a>: ParamStore {
+    type BorrowType;
 
-    fn borrow_or_get(&'a self) -> Self::BorrowOrGetType;
-    fn get_value(&'a self) -> glib::Value;
+    fn borrow(&'a self) -> Self::BorrowType;
 }
 pub trait ParamStoreWrite<'a>: ParamStore {
     fn set_owned(&'a self, value: <Self as ParamStore>::Type);
@@ -362,17 +367,20 @@ impl<T: ParamSpecBuildable> ParamSpecBuildable for std::cell::Cell<T> {
 impl<T: ValueType> ParamStore for std::cell::Cell<T> {
     type Type = T;
 }
-impl<'a, T> ParamStoreRead<'a> for std::cell::Cell<T>
+impl<T> ParamStoreRead for std::cell::Cell<T>
 where
     T: ValueType + Copy,
 {
-    type BorrowOrGetType = T;
-
-    fn borrow_or_get(&'a self) -> Self::BorrowOrGetType {
+    fn get_owned(&self) -> <Self as ParamStore>::Type {
         std::cell::Cell::get(self)
     }
-    fn get_value(&'a self) -> glib::Value {
-        self.borrow_or_get().to_value()
+}
+impl<T> ParamStoreReadValue for std::cell::Cell<T>
+where
+    T: ValueType + Copy,
+{
+    fn get_value(&self) -> glib::Value {
+        self.get_owned().to_value()
     }
 }
 impl<'a, T> ParamStoreWrite<'a> for std::cell::Cell<T>
@@ -403,17 +411,30 @@ impl<T: ParamSpecBuildable> ParamSpecBuildable for std::cell::RefCell<T> {
 impl<T: ValueType> ParamStore for std::cell::RefCell<T> {
     type Type = T;
 }
-impl<'a, T> ParamStoreRead<'a> for std::cell::RefCell<T>
+impl<T> ParamStoreRead for std::cell::RefCell<T>
 where
-    T: ValueType + Clone + 'a,
+    T: ValueType + Clone,
 {
-    type BorrowOrGetType = std::cell::Ref<'a, T>;
-
-    fn borrow_or_get(&'a self) -> Self::BorrowOrGetType {
-        std::cell::RefCell::borrow(self)
+    fn get_owned(&self) -> <Self as ParamStore>::Type {
+        self.borrow().clone()
     }
-    fn get_value(&'a self) -> glib::Value {
-        self.borrow_or_get().to_value()
+}
+impl<T> ParamStoreReadValue for std::cell::RefCell<T>
+where
+    T: ValueType,
+{
+    fn get_value(&self) -> glib::Value {
+        self.borrow().to_value()
+    }
+}
+impl<'a, T> ParamStoreBorrow<'a> for std::cell::RefCell<T>
+where
+    T: ValueType + 'a,
+{
+    type BorrowType = std::cell::Ref<'a, T>;
+
+    fn borrow(&'a self) -> Self::BorrowType {
+        std::cell::RefCell::borrow(self)
     }
 }
 impl<'a, T> ParamStoreWrite<'a> for std::cell::RefCell<T>
@@ -445,17 +466,30 @@ impl<T: ParamSpecBuildable> ParamSpecBuildable for std::sync::Mutex<T> {
 impl<T: ValueType> ParamStore for std::sync::Mutex<T> {
     type Type = T;
 }
-impl<'a, T> ParamStoreRead<'a> for std::sync::Mutex<T>
+impl<T> ParamStoreRead for std::sync::Mutex<T>
+where
+    T: ValueType + Clone,
+{
+    fn get_owned(&self) -> <Self as ParamStore>::Type {
+        self.borrow().clone()
+    }
+}
+impl<T> ParamStoreReadValue for std::sync::Mutex<T>
+where
+    T: ValueType,
+{
+    fn get_value(&self) -> glib::Value {
+        self.borrow().to_value()
+    }
+}
+impl<'a, T> ParamStoreBorrow<'a> for std::sync::Mutex<T>
 where
     T: ValueType + 'a,
 {
-    type BorrowOrGetType = std::sync::MutexGuard<'a, T>;
+    type BorrowType = std::sync::MutexGuard<'a, T>;
 
-    fn borrow_or_get(&'a self) -> Self::BorrowOrGetType {
+    fn borrow(&'a self) -> Self::BorrowType {
         self.lock().unwrap()
-    }
-    fn get_value(&'a self) -> glib::Value {
-        self.borrow_or_get().to_value()
     }
 }
 impl<'a, T> ParamStoreWrite<'a> for std::sync::Mutex<T>
@@ -487,17 +521,30 @@ impl<T: ParamSpecBuildable> ParamSpecBuildable for std::sync::RwLock<T> {
 impl<T: ValueType> ParamStore for std::sync::RwLock<T> {
     type Type = T;
 }
-impl<'a, T> ParamStoreRead<'a> for std::sync::RwLock<T>
+impl<T> ParamStoreRead for std::sync::RwLock<T>
+where
+    T: ValueType + Clone,
+{
+    fn get_owned(&self) -> <Self as ParamStore>::Type {
+        self.borrow().clone()
+    }
+}
+impl<T> ParamStoreReadValue for std::sync::RwLock<T>
+where
+    T: ValueType,
+{
+    fn get_value(&self) -> glib::Value {
+        self.borrow().to_value()
+    }
+}
+impl<'a, T> ParamStoreBorrow<'a> for std::sync::RwLock<T>
 where
     T: ValueType + 'a,
 {
-    type BorrowOrGetType = std::sync::RwLockReadGuard<'a, T>;
+    type BorrowType = std::sync::RwLockReadGuard<'a, T>;
 
-    fn borrow_or_get(&'a self) -> Self::BorrowOrGetType {
+    fn borrow(&'a self) -> Self::BorrowType {
         self.read().unwrap()
-    }
-    fn get_value(&'a self) -> glib::Value {
-        self.borrow_or_get().to_value()
     }
 }
 impl<'a, T> ParamStoreWrite<'a> for std::sync::RwLock<T>
@@ -529,18 +576,31 @@ impl<T: ParamSpecBuildable> ParamSpecBuildable for glib::once_cell::unsync::Once
 impl<T: ValueType> ParamStore for glib::once_cell::unsync::OnceCell<T> {
     type Type = T;
 }
-impl<'a, T> ParamStoreRead<'a> for glib::once_cell::unsync::OnceCell<T>
+impl<T> ParamStoreRead for glib::once_cell::unsync::OnceCell<T>
+where
+    T: ValueType + Clone,
+{
+    fn get_owned(&self) -> <Self as ParamStore>::Type {
+        self.borrow().clone()
+    }
+}
+impl<T> ParamStoreReadValue for glib::once_cell::unsync::OnceCell<T>
+where
+    T: ValueType,
+{
+    fn get_value(&self) -> glib::Value {
+        self.borrow().to_value()
+    }
+}
+impl<'a, T> ParamStoreBorrow<'a> for glib::once_cell::unsync::OnceCell<T>
 where
     T: ValueType + 'a,
 {
-    type BorrowOrGetType = &'a T;
+    type BorrowType = &'a T;
 
-    fn borrow_or_get(&'a self) -> Self::BorrowOrGetType {
+    fn borrow(&'a self) -> Self::BorrowType {
         self.get()
             .unwrap_or_else(|| panic!("`get()` called on uninitialized OnceCell"))
-    }
-    fn get_value(&'a self) -> glib::Value {
-        self.borrow_or_get().to_value()
     }
 }
 impl<'a, T> ParamStoreWrite<'a> for glib::once_cell::unsync::OnceCell<T>
@@ -572,18 +632,31 @@ impl<T: ParamSpecBuildable> ParamSpecBuildable for glib::once_cell::sync::OnceCe
 impl<T: ValueType> ParamStore for glib::once_cell::sync::OnceCell<T> {
     type Type = T;
 }
-impl<'a, T> ParamStoreRead<'a> for glib::once_cell::sync::OnceCell<T>
+impl<T> ParamStoreRead for glib::once_cell::sync::OnceCell<T>
 where
-    T: ValueType + Clone + 'a,
+    T: ValueType + Clone,
 {
-    type BorrowOrGetType = &'a T;
+    fn get_owned(&self) -> <Self as ParamStore>::Type {
+        self.borrow().clone()
+    }
+}
+impl<T> ParamStoreReadValue for glib::once_cell::sync::OnceCell<T>
+where
+    T: ValueType,
+{
+    fn get_value(&self) -> glib::Value {
+        self.borrow().to_value()
+    }
+}
+impl<'a, T> ParamStoreBorrow<'a> for glib::once_cell::sync::OnceCell<T>
+where
+    T: ValueType + 'a,
+{
+    type BorrowType = &'a T;
 
-    fn borrow_or_get(&'a self) -> Self::BorrowOrGetType {
+    fn borrow(&'a self) -> Self::BorrowType {
         self.get()
             .unwrap_or_else(|| panic!("`get()` called on uninitialized OnceCell"))
-    }
-    fn get_value(&'a self) -> glib::Value {
-        self.borrow_or_get().to_value()
     }
 }
 impl<'a, T> ParamStoreWrite<'a> for glib::once_cell::sync::OnceCell<T>
