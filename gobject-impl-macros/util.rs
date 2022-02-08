@@ -302,7 +302,7 @@ impl Output {
         for (index, prop) in properties.iter().filter(|p| !p.skip).enumerate() {
             props.push(prop.create(go));
             let index = index + 1;
-            if let Some(set) = prop.set_impl(index, inheritance, go) {
+            if let Some(set) = prop.set_impl(index, go) {
                 prop_set_impls.push(set);
             }
             if let Some(get) = prop.get_impl(index, go) {

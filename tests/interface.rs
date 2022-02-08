@@ -18,8 +18,6 @@ fn interface() {
             struct DummyInterface {
                 #[property(get, set)]
                 my_prop: u64,
-                #[property(get, set = auto)]
-                my_auto_prop: i64,
             }
         }
         #[signal]
@@ -28,27 +26,6 @@ fn interface() {
     unsafe impl<T: glib::subclass::types::ObjectSubclass> glib::subclass::types::IsImplementable<T>
         for Dummy
     {
-    }
-
-    glib::wrapper! {
-        pub struct Other(ObjectInterface<OtherInterface>);
-    }
-    #[derive(Clone, Copy)]
-    pub struct OtherInterface {
-        _parent: glib::gobject_ffi::GTypeInterface,
-    }
-    #[interface_impl(type = Other, trait = OtherExt)]
-    #[glib::object_interface]
-    unsafe impl glib::subclass::interface::ObjectInterface for OtherInterface {
-        const NAME: &'static str = "Other";
-        properties! {
-            struct OtherInterface {
-                #[property(get, set)]
-                other_prop: i8,
-            }
-        }
-        #[signal]
-        fn my_sig(&self, hello: i32) {}
     }
 
     glib::wrapper! {
@@ -71,12 +48,10 @@ fn interface() {
         properties! {
             #[derive(Default)]
             pub struct ImplementorPrivate {
-                #[property(get, set, override = Dummy)]
+                #[property(get, set, override_iface = Dummy)]
                 my_prop: Cell<u64>,
-                #[property(get, set = auto, override = Dummy, minimum = -10, maximum = 10)]
+                #[property(get, set, set_inline, minimum = -10, maximum = 10)]
                 my_auto_prop: Cell<i64>,
-                #[property(get, set, override = Other, !inherit)]
-                other_prop: Cell<i8>,
             }
         }
     }
@@ -84,5 +59,5 @@ fn interface() {
     let obj = glib::Object::new::<Implementor>(&[]).unwrap();
     obj.set_my_prop(4000);
     obj.set_my_auto_prop(-5);
-    obj.set_other_prop(22);
+    obj.emit_my_sig(123);
 }

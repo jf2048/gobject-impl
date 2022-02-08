@@ -239,7 +239,7 @@ impl Signal {
                     if !attr.tokens.is_empty() {
                         return Err(syn::Error::new_spanned(
                             &attr.tokens,
-                            "Unknown token on accumulator",
+                            "Unknown tokens on accumulator",
                         ));
                     }
                     if !(2..=3).contains(&method.sig.inputs.len()) {

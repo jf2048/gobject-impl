@@ -1,4 +1,3 @@
-use glib::once_cell::unsync::OnceCell;
 use glib::prelude::*;
 use glib::subclass::prelude::*;
 use gobject_impl::object_impl;
@@ -20,6 +19,8 @@ macro_rules! wrapper {
 
 #[test]
 fn basic_properties() {
+    use glib::once_cell::unsync::OnceCell;
+
     #[derive(Default)]
     struct BasicPropsInner {
         my_bool: Cell<bool>,
@@ -51,11 +52,13 @@ fn basic_properties() {
                 my_construct_only: Cell<f64>,
                 #[property(get, set, explicit_notify, lax_validation)]
                 my_explicit: Cell<u64>,
-                #[property(get, set = auto, construct_only)]
+                #[property(get, set, set_inline)]
                 my_auto_set: OnceCell<f32>,
-                #[property(get = _, set = _, explicit_notify, lax_validation)]
+                #[property(get, set, set_inline, construct_only)]
+                my_auto_set_co: OnceCell<f32>,
+                #[property(get = _, set = _, set_inline)]
                 my_custom_accessors: RefCell<String>,
-                #[property(virtual, get, set, explicit_notify)]
+                #[property(computed, get, set, explicit_notify)]
                 my_computed_prop: i32,
                 #[property(get, set, storage = inner.my_bool)]
                 my_delegate: Cell<bool>,
@@ -90,8 +93,8 @@ fn basic_properties() {
     }
 
     let props = glib::Object::new::<BasicProps>(&[]).unwrap();
-    assert_eq!(BasicPropsPrivate::properties().len(), 14);
-    assert_eq!(props.list_properties().len(), 14);
+    assert_eq!(BasicPropsPrivate::properties().len(), 15);
+    assert_eq!(props.list_properties().len(), 15);
     props.connect_my_i32_notify(|props| props.set_my_str("Updated".into()));
     assert_eq!(*props.my_str(), "");
     props.set_my_i32(5);
@@ -107,17 +110,19 @@ fn basic_properties() {
 fn complex_properties() {
     use glib::once_cell::unsync::OnceCell;
 
-    wrapper!(DummyObject(DummyObjectPrivate));
-    #[object_impl(trait = DummyObjectExt)]
-    impl ObjectImpl for DummyObjectPrivate {
+    wrapper!(BaseObject(BaseObjectPrivate));
+    #[object_impl(trait = BaseObjectExt)]
+    impl ObjectImpl for BaseObjectPrivate {
         properties! {
             #[derive(Default)]
-            pub struct DummyObjectPrivate {
-                #[property(name = "renamed-string", get, set, construct, default = "foobar")]
-                a_string: RefCell<String>,
+            pub struct BaseObjectPrivate {
+                #[property(name = "renamed-string", abstract, get, set, construct, default = "foobar")]
+                a_string: String,
             }
         }
     }
+    pub trait BaseObjectImpl: ObjectImpl + 'static {}
+    unsafe impl<T: BaseObjectImpl> glib::subclass::types::IsSubclassable<T> for BaseObject {}
 
     #[derive(Debug, Eq, PartialEq, Clone, Copy, glib::Enum)]
     #[repr(u32)]
@@ -129,7 +134,39 @@ fn complex_properties() {
         Badger,
     }
 
-    wrapper!(ComplexProps(ComplexPropsPrivate));
+    glib::wrapper! {
+        pub struct SmallObject(ObjectSubclass<SmallObjectPrivate>)
+            @extends BaseObject;
+    }
+    #[glib::object_subclass]
+    impl ObjectSubclass for SmallObjectPrivate {
+        const NAME: &'static str = "SmallObject";
+        type Type = SmallObject;
+        type ParentType = BaseObject;
+    }
+
+    #[object_impl(trait = SmallObjectExt)]
+    impl ObjectImpl for SmallObjectPrivate {
+        properties! {
+            #[derive(Default)]
+            pub struct SmallObjectPrivate {
+                #[property(get, set, override_class = BaseObject)]
+                renamed_string: RefCell<String>,
+            }
+        }
+    }
+    impl BaseObjectImpl for SmallObjectPrivate {}
+
+    glib::wrapper! {
+        pub struct ComplexProps(ObjectSubclass<ComplexPropsPrivate>)
+            @extends BaseObject;
+    }
+    #[glib::object_subclass]
+    impl ObjectSubclass for ComplexPropsPrivate {
+        const NAME: &'static str = "ComplexProps";
+        type Type = ComplexProps;
+        type ParentType = BaseObject;
+    }
     impl Default for ComplexPropsPrivate {
         fn default() -> Self {
             Self {
@@ -156,7 +193,7 @@ fn complex_properties() {
                 #[property(get, set, boxed)]
                 optional_time: RefCell<Option<glib::DateTime>>,
                 #[property(get, set, object, construct_only)]
-                dummy: OnceCell<DummyObject>,
+                dummy: OnceCell<BaseObject>,
                 #[property(get, set, enum)]
                 animal: Cell<Animal>,
                 #[property(get, set, flags)]
@@ -165,13 +202,14 @@ fn complex_properties() {
                 pspec: RefCell<glib::ParamSpec>,
                 #[property(get, set, variant = "i")]
                 variant: RefCell<glib::Variant>,
-                #[property(get, set, override_class = DummyObject)]
+                #[property(get, set, override_class = BaseObject)]
                 renamed_string: RefCell<String>,
             }
         }
     }
+    impl BaseObjectImpl for ComplexPropsPrivate {}
 
-    let dummy = glib::Object::new::<DummyObject>(&[]).unwrap();
+    let dummy = glib::Object::new::<SmallObject>(&[]).unwrap();
     let obj = glib::Object::new::<ComplexProps>(&[("dummy", &dummy)]).unwrap();
     obj.set_renamed_string("hello".into());
     assert_eq!(&*obj.dummy().renamed_string(), "foobar");
