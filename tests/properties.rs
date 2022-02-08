@@ -214,6 +214,31 @@ fn complex_properties() {
     let obj = glib::Object::new::<ComplexProps>(&[("dummy", &dummy)]).unwrap();
     obj.set_renamed_string("hello".into());
     assert_eq!(&*obj.dummy().renamed_string(), "foobar");
+
+}
+
+#[test]
+#[should_panic(expected = "property 'object-type' of type 'MyObj' can't be set from given value")]
+fn validation() {
+    wrapper!(MyObj(MyObjPrivate));
+    impl Default for MyObjPrivate {
+        fn default() -> Self {
+            Self {
+                object_type: Cell::new(glib::Object::static_type()),
+            }
+        }
+    }
+    #[object_impl(final, type = MyObj)]
+    impl ObjectImpl for MyObjPrivate {
+        properties! {
+            pub struct MyObjPrivate {
+                #[property(get, set, subtype = glib::Object)]
+                object_type: Cell<glib::Type>,
+            }
+        }
+    }
+    let obj = glib::Object::new::<MyObj>(&[]).unwrap();
+    obj.set_object_type(glib::Type::U8);
 }
 
 #[test]
