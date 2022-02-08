@@ -132,9 +132,9 @@ impl PropertyStorage {
         match self {
             Self::Field(_) => None,
             Self::InterfaceAbstract => unimplemented!(),
-            Self::Abstract(kw) => Some(&kw),
-            Self::Computed(kw) => Some(&kw),
-            Self::Delegate(kw, _) => Some(&kw),
+            Self::Abstract(kw) => Some(kw),
+            Self::Computed(kw) => Some(kw),
+            Self::Delegate(kw, _) => Some(kw),
         }
     }
 }
@@ -309,9 +309,16 @@ impl Property {
                 prop.skip = true;
             } else if lookahead.peek(keywords::get) || lookahead.peek(keywords::set) {
                 let kw = input.parse::<syn::Ident>()?;
-                let perm = if kw == "get" { &mut prop.get } else { &mut prop.set };
+                let perm = if kw == "get" {
+                    &mut prop.get
+                } else {
+                    &mut prop.set
+                };
                 if *perm != PropertyPermission::default_for(pod) {
-                    return Err(syn::Error::new_spanned(&kw, format!("Duplicate `{}` attribute", kw)));
+                    return Err(syn::Error::new_spanned(
+                        &kw,
+                        format!("Duplicate `{}` attribute", kw),
+                    ));
                 }
                 if pod || input.peek(Token![=]) {
                     input.parse::<Token![=]>()?;
@@ -336,7 +343,10 @@ impl Property {
             } else if !pod && !iface && lookahead.peek(keywords::set_inline) {
                 let kw = input.parse()?;
                 if prop.set_inline.is_some() {
-                    return Err(syn::Error::new_spanned(kw, "Duplicate `set_inline` attribute"));
+                    return Err(syn::Error::new_spanned(
+                        kw,
+                        "Duplicate `set_inline` attribute",
+                    ));
                 }
                 prop.set_inline.replace(Some(kw));
             } else if lookahead.peek(Token![!]) {
@@ -357,7 +367,10 @@ impl Property {
                 } else if pod && lookahead.peek(keywords::set_inline) {
                     let kw = input.parse::<keywords::set_inline>()?;
                     if prop.set_inline.is_none() {
-                        return Err(syn::Error::new_spanned(kw, "Duplicate `set_inline` attribute"));
+                        return Err(syn::Error::new_spanned(
+                            kw,
+                            "Duplicate `set_inline` attribute",
+                        ));
                     }
                     prop.set = PropertyPermission::Deny;
                 } else if lookahead.peek(keywords::notify_func) {
@@ -489,7 +502,9 @@ impl Property {
                 input.parse::<Token![=]>()?;
                 let s = input.parse::<syn::LitStr>()?;
                 prop.buildable_props.push((ident, syn::Lit::Str(s)));
-            } else if lookahead.peek(keywords::override_iface) || lookahead.peek(keywords::override_class) {
+            } else if lookahead.peek(keywords::override_iface)
+                || lookahead.peek(keywords::override_class)
+            {
                 let ident: syn::Ident = input.call(syn::ext::IdentExt::parse_any)?;
                 if prop.override_.is_some() {
                     return Err(syn::Error::new_spanned(
@@ -605,15 +620,19 @@ impl Property {
                 ));
             }
             match &self.storage {
-                PropertyStorage::Abstract(_) => return Err(syn::Error::new_spanned(
-                    borrow,
-                    "`borrow` not allowed on abstract property",
-                )),
-                PropertyStorage::Computed(_) => return Err(syn::Error::new_spanned(
-                    borrow,
-                    "`borrow` not allowed on computed property",
-                )),
-                _ => {},
+                PropertyStorage::Abstract(_) => {
+                    return Err(syn::Error::new_spanned(
+                        borrow,
+                        "`borrow` not allowed on abstract property",
+                    ))
+                }
+                PropertyStorage::Computed(_) => {
+                    return Err(syn::Error::new_spanned(
+                        borrow,
+                        "`borrow` not allowed on computed property",
+                    ))
+                }
+                _ => {}
             }
         }
         if self.override_.is_some() {
@@ -682,16 +701,13 @@ impl Property {
                 ));
             }
         }
-        match &self.get {
-            PropertyPermission::AllowNoMethod(kw) => {
-                if matches!(self.storage, PropertyStorage::Computed(_)) {
-                    return Err(syn::Error::new_spanned(
-                        kw,
-                        "`get = ()` not allowed on computed property",
-                    ));
-                }
-            },
-            _ => {}
+        if let PropertyPermission::AllowNoMethod(kw) = &self.get {
+            if matches!(self.storage, PropertyStorage::Computed(_)) {
+                return Err(syn::Error::new_spanned(
+                    kw,
+                    "`get = ()` not allowed on computed property",
+                ));
+            }
         }
         match &self.set {
             PropertyPermission::AllowNoMethod(kw) => {
@@ -701,7 +717,7 @@ impl Property {
                         "`set = ()` not allowed on computed property",
                     ));
                 }
-            },
+            }
             PropertyPermission::AllowCustom(method) => {
                 if self.set_inline.is_none() && method == &self.setter_name() {
                     return Err(syn::Error::new_spanned(
@@ -709,14 +725,16 @@ impl Property {
                         "custom setter name conflicts with trait method",
                     ));
                 }
-            },
+            }
             _ => {}
         }
         if matches!(self.set, PropertyPermission::Deny) {
             for flag in &self.flag_idents {
                 if flag == "construct" || flag == "construct_only" {
-                return Err(syn::Error::new_spanned(flag,
-                    format!("`{}` not allowed on read-only property", flag)));
+                    return Err(syn::Error::new_spanned(
+                        flag,
+                        format!("`{}` not allowed on read-only property", flag),
+                    ));
                 }
             }
         }
@@ -853,7 +871,10 @@ impl Property {
         self.override_.is_some()
     }
     fn is_abstract(&self) -> bool {
-        matches!(self.storage, PropertyStorage::Abstract(_) | PropertyStorage::InterfaceAbstract)
+        matches!(
+            self.storage,
+            PropertyStorage::Abstract(_) | PropertyStorage::InterfaceAbstract
+        )
     }
     #[inline]
     fn getter_name(&self) -> syn::Ident {
@@ -938,9 +959,14 @@ impl Property {
         format_ident!("set_{}", self.name().to_snake_case())
     }
     #[inline]
-    fn inline_set_impl<N>(&self, object_type: Option<&TokenStream>, notify: N, go: &syn::Ident) -> TokenStream
-        where
-            N: FnOnce() -> TokenStream
+    fn inline_set_impl<N>(
+        &self,
+        object_type: Option<&TokenStream>,
+        notify: N,
+        go: &syn::Ident,
+    ) -> TokenStream
+    where
+        N: FnOnce() -> TokenStream,
     {
         let min = self
             .find_buildable_prop("minimum")
@@ -968,11 +994,7 @@ impl Property {
             #body
         }
     }
-    pub fn set_impl(
-        &self,
-        index: usize,
-        go: &syn::Ident,
-    ) -> Option<TokenStream> {
+    pub fn set_impl(&self, index: usize, go: &syn::Ident) -> Option<TokenStream> {
         (self.set.is_allowed() && !self.is_abstract()).then(|| {
             let glib = quote! { #go::glib };
             let body = if let PropertyPermission::AllowCustom(method) = &self.set {
@@ -1010,15 +1032,13 @@ impl Property {
         let allowed = match &self.set {
             PropertyPermission::Allow => true,
             PropertyPermission::AllowCustom(_) => self.set_inline.is_none(),
-            _ => false
+            _ => false,
         };
-        (allowed && !construct_only && !self.is_inherited()).then(
-            || {
-                let method_name = self.setter_name();
-                let ty = self.inner_type(go);
-                quote_spanned! { self.span => fn #method_name(&self, value: #ty) }
-            },
-        )
+        (allowed && !construct_only && !self.is_inherited()).then(|| {
+            let method_name = self.setter_name();
+            let ty = self.inner_type(go);
+            quote_spanned! { self.span => fn #method_name(&self, value: #ty) }
+        })
     }
     pub fn setter_definition(
         &self,
@@ -1031,13 +1051,15 @@ impl Property {
             let body = if !self.is_abstract() && self.set_inline.is_some() {
                 self.inline_set_impl(
                     Some(object_type),
-                    || quote! {
-                        <Self as #go::glib::object::ObjectExt>::notify_by_pspec(
-                            self,
-                            &#properties_path()[#index]
-                        );
+                    || {
+                        quote! {
+                            <Self as #go::glib::object::ObjectExt>::notify_by_pspec(
+                                self,
+                                &#properties_path()[#index]
+                            );
+                        }
                     },
-                    go
+                    go,
                 )
             } else {
                 let name = self.name();
