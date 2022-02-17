@@ -214,7 +214,6 @@ fn complex_properties() {
     let obj = glib::Object::new::<ComplexProps>(&[("dummy", &dummy)]).unwrap();
     obj.set_renamed_string("hello".into());
     assert_eq!(&*obj.dummy().renamed_string(), "foobar");
-
 }
 
 #[test]

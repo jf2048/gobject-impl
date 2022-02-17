@@ -566,17 +566,19 @@ where
     }
 }
 
-impl<T: ParamSpecBuildable> ParamSpecBuildable for glib::once_cell::unsync::OnceCell<T> {
+pub use glib::once_cell::unsync::OnceCell;
+
+impl<T: ParamSpecBuildable> ParamSpecBuildable for OnceCell<T> {
     type Builder = T::Builder;
 
     fn builder() -> <Self as ParamSpecBuildable>::Builder {
         T::builder()
     }
 }
-impl<T: ValueType> ParamStore for glib::once_cell::unsync::OnceCell<T> {
+impl<T: ValueType> ParamStore for OnceCell<T> {
     type Type = T;
 }
-impl<T> ParamStoreRead for glib::once_cell::unsync::OnceCell<T>
+impl<T> ParamStoreRead for OnceCell<T>
 where
     T: ValueType + Clone,
 {
@@ -584,7 +586,7 @@ where
         self.borrow().clone()
     }
 }
-impl<T> ParamStoreReadValue for glib::once_cell::unsync::OnceCell<T>
+impl<T> ParamStoreReadValue for OnceCell<T>
 where
     T: ValueType,
 {
@@ -592,7 +594,7 @@ where
         self.borrow().to_value()
     }
 }
-impl<'a, T> ParamStoreBorrow<'a> for glib::once_cell::unsync::OnceCell<T>
+impl<'a, T> ParamStoreBorrow<'a> for OnceCell<T>
 where
     T: ValueType + 'a,
 {
@@ -603,7 +605,7 @@ where
             .unwrap_or_else(|| panic!("`get()` called on uninitialized OnceCell"))
     }
 }
-impl<'a, T> ParamStoreWrite<'a> for glib::once_cell::unsync::OnceCell<T>
+impl<'a, T> ParamStoreWrite<'a> for OnceCell<T>
 where
     T: ValueType,
 {
@@ -612,7 +614,7 @@ where
             .unwrap_or_else(|_| panic!("set() called on initialized OnceCell"));
     }
 }
-impl<'a, T> ParamStoreWriteChanged<'a> for glib::once_cell::unsync::OnceCell<T>
+impl<'a, T> ParamStoreWriteChanged<'a> for OnceCell<T>
 where
     T: ValueType + PartialEq + Copy,
 {
@@ -622,17 +624,19 @@ where
     }
 }
 
-impl<T: ParamSpecBuildable> ParamSpecBuildable for glib::once_cell::sync::OnceCell<T> {
+pub use glib::once_cell::sync::OnceCell as SyncOnceCell;
+
+impl<T: ParamSpecBuildable> ParamSpecBuildable for SyncOnceCell<T> {
     type Builder = T::Builder;
 
     fn builder() -> <Self as ParamSpecBuildable>::Builder {
         T::builder()
     }
 }
-impl<T: ValueType> ParamStore for glib::once_cell::sync::OnceCell<T> {
+impl<T: ValueType> ParamStore for SyncOnceCell<T> {
     type Type = T;
 }
-impl<T> ParamStoreRead for glib::once_cell::sync::OnceCell<T>
+impl<T> ParamStoreRead for SyncOnceCell<T>
 where
     T: ValueType + Clone,
 {
@@ -640,7 +644,7 @@ where
         self.borrow().clone()
     }
 }
-impl<T> ParamStoreReadValue for glib::once_cell::sync::OnceCell<T>
+impl<T> ParamStoreReadValue for SyncOnceCell<T>
 where
     T: ValueType,
 {
@@ -648,7 +652,7 @@ where
         self.borrow().to_value()
     }
 }
-impl<'a, T> ParamStoreBorrow<'a> for glib::once_cell::sync::OnceCell<T>
+impl<'a, T> ParamStoreBorrow<'a> for SyncOnceCell<T>
 where
     T: ValueType + 'a,
 {
@@ -659,7 +663,7 @@ where
             .unwrap_or_else(|| panic!("`get()` called on uninitialized OnceCell"))
     }
 }
-impl<'a, T> ParamStoreWrite<'a> for glib::once_cell::sync::OnceCell<T>
+impl<'a, T> ParamStoreWrite<'a> for SyncOnceCell<T>
 where
     T: ValueType,
 {
@@ -668,12 +672,95 @@ where
             .unwrap_or_else(|_| panic!("set() called on initialized OnceCell"));
     }
 }
-impl<'a, T> ParamStoreWriteChanged<'a> for glib::once_cell::sync::OnceCell<T>
+impl<'a, T> ParamStoreWriteChanged<'a> for SyncOnceCell<T>
 where
     T: ValueType + PartialEq + Copy,
 {
     fn set_owned_checked(&'a self, value: <Self as ParamStore>::Type) -> bool {
         self.set_owned(value);
         true
+    }
+}
+
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct ConstructCell<T>(std::cell::RefCell<Option<T>>);
+
+impl<T> ConstructCell<T> {
+    pub fn new(value: T) -> Self {
+        Self(std::cell::RefCell::new(Some(value)))
+    }
+    pub fn new_empty() -> Self {
+        Self(std::cell::RefCell::new(None))
+    }
+    pub fn borrow(&self) -> std::cell::Ref<'_, T> {
+        std::cell::Ref::map(self.0.borrow(), |r| r.as_ref().unwrap())
+    }
+    pub fn borrow_mut(&self) -> std::cell::RefMut<'_, T> {
+        std::cell::RefMut::map(self.0.borrow_mut(), |r| r.as_mut().unwrap())
+    }
+    pub fn replace(&self, t: T) -> Option<T> {
+        self.0.replace(Some(t))
+    }
+}
+
+impl<T> Default for ConstructCell<T> {
+    fn default() -> Self {
+        Self::new_empty()
+    }
+}
+
+impl<T: ParamSpecBuildable> ParamSpecBuildable for ConstructCell<T> {
+    type Builder = T::Builder;
+
+    fn builder() -> <Self as ParamSpecBuildable>::Builder {
+        T::builder()
+    }
+}
+impl<T: ValueType> ParamStore for ConstructCell<T> {
+    type Type = T;
+}
+impl<T> ParamStoreRead for ConstructCell<T>
+where
+    T: ValueType + Clone,
+{
+    fn get_owned(&self) -> <Self as ParamStore>::Type {
+        self.borrow().clone()
+    }
+}
+impl<T> ParamStoreReadValue for ConstructCell<T>
+where
+    T: ValueType,
+{
+    fn get_value(&self) -> glib::Value {
+        self.borrow().to_value()
+    }
+}
+impl<'a, T> ParamStoreBorrow<'a> for ConstructCell<T>
+where
+    T: ValueType + 'a,
+{
+    type BorrowType = std::cell::Ref<'a, T>;
+
+    fn borrow(&'a self) -> Self::BorrowType {
+        ConstructCell::borrow(self)
+    }
+}
+impl<'a, T> ParamStoreWrite<'a> for ConstructCell<T>
+where
+    T: ValueType,
+{
+    fn set_owned(&'a self, value: <Self as ParamStore>::Type) {
+        self.replace(value);
+    }
+}
+impl<'a, T> ParamStoreWriteChanged<'a> for ConstructCell<T>
+where
+    T: ValueType + PartialEq,
+{
+    fn set_owned_checked(&'a self, value: <Self as ParamStore>::Type) -> bool {
+        let mut storage = self.borrow_mut();
+        let old = std::mem::replace(storage.deref_mut(), value);
+        old != *storage
     }
 }
